@@ -1,0 +1,229 @@
+enum AttendanceStatus { present, late, absent, excused }
+
+enum SyncStatus { pending, synced, failed }
+
+enum UserRole { admin, teacher, student }
+
+class Student {
+  final String id;
+  final String studentCode;
+  final String firstName;
+  final String lastName;
+  final int gradeLevel;
+  final String homeroom;
+
+  const Student({
+    required this.id,
+    required this.studentCode,
+    required this.firstName,
+    required this.lastName,
+    required this.gradeLevel,
+    required this.homeroom,
+  });
+
+  String get fullName => '$lastName, $firstName';
+  String get displayName => '$firstName $lastName';
+  String get sortInitial => lastName.isNotEmpty ? lastName[0].toUpperCase() : '#';
+
+  factory Student.fromMap(Map<String, dynamic> map) => Student(
+        id: map['id'] as String,
+        studentCode: map['student_code'] as String,
+        firstName: map['first_name'] as String,
+        lastName: map['last_name'] as String,
+        gradeLevel: map['grade_level'] as int,
+        homeroom: map['homeroom'] as String,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'student_code': studentCode,
+        'first_name': firstName,
+        'last_name': lastName,
+        'grade_level': gradeLevel,
+        'homeroom': homeroom,
+      };
+}
+
+class Lecture {
+  final String id;
+  final String courseCode;
+  final String title;
+  final String teacherId;
+  final String teacherName;
+  final String roomNumber;
+  final int periodNumber;
+  final int lateGraceMinutes;
+
+  const Lecture({
+    required this.id,
+    required this.courseCode,
+    required this.title,
+    required this.teacherId,
+    required this.teacherName,
+    required this.roomNumber,
+    required this.periodNumber,
+    this.lateGraceMinutes = 10,
+  });
+
+  factory Lecture.fromMap(Map<String, dynamic> map) => Lecture(
+        id: map['id'] as String,
+        courseCode: map['course_code'] as String,
+        title: map['title'] as String,
+        teacherId: map['teacher_id'] as String,
+        teacherName: (map['teacher_name'] as String?) ?? 'Faculty',
+        roomNumber: map['room_number'] as String,
+        periodNumber: map['period_number'] as int,
+        lateGraceMinutes: (map['late_grace_minutes'] as int?) ?? 10,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'course_code': courseCode,
+        'title': title,
+        'teacher_id': teacherId,
+        'teacher_name': teacherName,
+        'room_number': roomNumber,
+        'period_number': periodNumber,
+        'late_grace_minutes': lateGraceMinutes,
+      };
+}
+
+class AttendanceSession {
+  final String id;
+  final String lectureId;
+  final String teacherId;
+  final DateTime startedAt;
+  final DateTime? endedAt;
+  final bool isLockedPassMode;
+  final int enrolledCount;
+
+  const AttendanceSession({
+    required this.id,
+    required this.lectureId,
+    required this.teacherId,
+    required this.startedAt,
+    this.endedAt,
+    this.isLockedPassMode = true,
+    required this.enrolledCount,
+  });
+
+  AttendanceSession copyWith({
+    DateTime? endedAt,
+    bool? isLockedPassMode,
+  }) =>
+      AttendanceSession(
+        id: id,
+        lectureId: lectureId,
+        teacherId: teacherId,
+        startedAt: startedAt,
+        endedAt: endedAt ?? this.endedAt,
+        isLockedPassMode: isLockedPassMode ?? this.isLockedPassMode,
+        enrolledCount: enrolledCount,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'lecture_id': lectureId,
+        'teacher_id': teacherId,
+        'started_at': startedAt.toIso8601String(),
+        'ended_at': endedAt?.toIso8601String(),
+        'is_locked_pass_mode': isLockedPassMode ? 1 : 0,
+        'enrolled_count': enrolledCount,
+      };
+}
+
+class AttendanceRecord {
+  final String id;
+  final String sessionId;
+  final String lectureId;
+  final String studentId;
+  final AttendanceStatus status;
+  final DateTime? checkedInAt;
+  final bool biometricVerified;
+  final String? biometricMethod;
+  final String? overrideReason;
+  final SyncStatus syncStatus;
+  final DateTime deviceRecordedAt;
+
+  const AttendanceRecord({
+    required this.id,
+    required this.sessionId,
+    required this.lectureId,
+    required this.studentId,
+    required this.status,
+    this.checkedInAt,
+    this.biometricVerified = false,
+    this.biometricMethod,
+    this.overrideReason,
+    this.syncStatus = SyncStatus.pending,
+    required this.deviceRecordedAt,
+  });
+
+  bool get isLocked => biometricVerified && (status == AttendanceStatus.present || status == AttendanceStatus.late);
+
+  AttendanceRecord copyWith({
+    AttendanceStatus? status,
+    DateTime? checkedInAt,
+    bool? biometricVerified,
+    String? biometricMethod,
+    String? overrideReason,
+    SyncStatus? syncStatus,
+    DateTime? deviceRecordedAt,
+  }) =>
+      AttendanceRecord(
+        id: id,
+        sessionId: sessionId,
+        lectureId: lectureId,
+        studentId: studentId,
+        status: status ?? this.status,
+        checkedInAt: checkedInAt ?? this.checkedInAt,
+        biometricVerified: biometricVerified ?? this.biometricVerified,
+        biometricMethod: biometricMethod ?? this.biometricMethod,
+        overrideReason: overrideReason ?? this.overrideReason,
+        syncStatus: syncStatus ?? this.syncStatus,
+        deviceRecordedAt: deviceRecordedAt ?? this.deviceRecordedAt,
+      );
+
+  factory AttendanceRecord.fromMap(Map<String, dynamic> map) => AttendanceRecord(
+        id: map['id'] as String,
+        sessionId: map['session_id'] as String,
+        lectureId: map['lecture_id'] as String,
+        studentId: map['student_id'] as String,
+        status: AttendanceStatus.values.byName(map['status'] as String),
+        checkedInAt: map['checked_in_at'] != null
+            ? DateTime.parse(map['checked_in_at'] as String)
+            : null,
+        biometricVerified: (map['biometric_verified'] as int) == 1,
+        biometricMethod: map['biometric_method'] as String?,
+        overrideReason: map['override_reason'] as String?,
+        syncStatus: SyncStatus.values.byName(map['sync_status'] as String),
+        deviceRecordedAt: DateTime.parse(map['device_recorded_at'] as String),
+      );
+
+  Map<String, dynamic> toSqliteMap() => {
+        'id': id,
+        'session_id': sessionId,
+        'lecture_id': lectureId,
+        'student_id': studentId,
+        'status': status.name,
+        'checked_in_at': checkedInAt?.toIso8601String(),
+        'biometric_verified': biometricVerified ? 1 : 0,
+        'biometric_method': biometricMethod,
+        'override_reason': overrideReason,
+        'sync_status': syncStatus.name,
+        'device_recorded_at': deviceRecordedAt.toIso8601String(),
+      };
+
+  Map<String, dynamic> toSupabasePayload() => {
+        'id': id,
+        'session_id': sessionId,
+        'lecture_id': lectureId,
+        'student_id': studentId,
+        'status': status.name,
+        'checked_in_at': checkedInAt?.toIso8601String(),
+        'biometric_verified': biometricVerified,
+        'biometric_method': biometricMethod,
+        'override_reason': overrideReason,
+        'device_recorded_at': deviceRecordedAt.toIso8601String(),
+      };
+}

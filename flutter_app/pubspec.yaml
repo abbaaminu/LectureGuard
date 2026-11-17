@@ -1,0 +1,32 @@
+name: lecture_guard
+description: Offline-first biometric lecture attendance and high school reporting app.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  sqflite: ^2.4.1
+  path: ^1.9.0
+  local_auth: ^2.3.0
+  flutter_secure_storage: ^9.2.2
+  supabase_flutter: ^2.8.0
+  connectivity_plus: ^6.1.0
+  crypto: ^3.0.6
+  uuid: ^4.5.1
+  intl: ^0.19.0
+  csv: ^6.0.0
+  pdf: ^3.11.1
+  printing: ^5.13.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

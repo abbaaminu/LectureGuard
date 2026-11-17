@@ -1,0 +1,6 @@
+{
+  "name": "LectureGuard",
+  "description": "Offline-first high school lecture attendance system with biometric pass-the-phone check-in, PIN lockdown, local SQLite sync, and school-wide analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
