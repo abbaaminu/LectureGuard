@@ -23,7 +23,8 @@ class Student {
 
   String get fullName => '$lastName, $firstName';
   String get displayName => '$firstName $lastName';
-  String get sortInitial => lastName.isNotEmpty ? lastName[0].toUpperCase() : '#';
+  String get sortInitial =>
+      lastName.isNotEmpty ? lastName[0].toUpperCase() : '#';
 
   factory Student.fromMap(Map<String, dynamic> map) => Student(
         id: map['id'] as String,
@@ -92,6 +93,8 @@ class AttendanceSession {
   final String id;
   final String lectureId;
   final String teacherId;
+  final String deviceId;
+  final String sessionDate;
   final DateTime startedAt;
   final DateTime? endedAt;
   final bool isLockedPassMode;
@@ -101,6 +104,8 @@ class AttendanceSession {
     required this.id,
     required this.lectureId,
     required this.teacherId,
+    required this.deviceId,
+    required this.sessionDate,
     required this.startedAt,
     this.endedAt,
     this.isLockedPassMode = true,
@@ -115,20 +120,62 @@ class AttendanceSession {
         id: id,
         lectureId: lectureId,
         teacherId: teacherId,
+        deviceId: deviceId,
+        sessionDate: sessionDate,
         startedAt: startedAt,
         endedAt: endedAt ?? this.endedAt,
         isLockedPassMode: isLockedPassMode ?? this.isLockedPassMode,
         enrolledCount: enrolledCount,
       );
 
+  factory AttendanceSession.fromMap(Map<String, dynamic> map) {
+    final startedAt = DateTime.parse(map['started_at'] as String);
+    final sessionDate = map['session_date'] as String?;
+    return AttendanceSession(
+      id: map['id'] as String,
+      lectureId: map['lecture_id'] as String,
+      teacherId: map['teacher_id'] as String,
+      deviceId: map['device_id'] as String,
+      sessionDate: sessionDate == null || sessionDate.isEmpty
+          ? '${startedAt.year.toString().padLeft(4, '0')}-'
+              '${startedAt.month.toString().padLeft(2, '0')}-'
+              '${startedAt.day.toString().padLeft(2, '0')}'
+          : sessionDate,
+      startedAt: startedAt,
+      endedAt: map['ended_at'] == null
+          ? null
+          : DateTime.parse(map['ended_at'] as String),
+      isLockedPassMode: (map['is_locked_pass_mode'] as int) == 1,
+      enrolledCount: map['enrolled_count'] as int,
+    );
+  }
+
   Map<String, dynamic> toMap() => {
         'id': id,
         'lecture_id': lectureId,
         'teacher_id': teacherId,
+        'device_id': deviceId,
+        'session_date': sessionDate,
         'started_at': startedAt.toIso8601String(),
         'ended_at': endedAt?.toIso8601String(),
         'is_locked_pass_mode': isLockedPassMode ? 1 : 0,
         'enrolled_count': enrolledCount,
+      };
+
+  Map<String, dynamic> toSupabasePayload() => {
+        'id': id,
+        'lecture_id': lectureId,
+        'teacher_id': teacherId,
+        'device_id': deviceId,
+        'session_date': sessionDate,
+        'started_at': startedAt.toUtc().toIso8601String(),
+        'ended_at': endedAt?.toUtc().toIso8601String(),
+        'state': endedAt != null
+            ? 'completed'
+            : isLockedPassMode
+                ? 'locked_pass_mode'
+                : 'active',
+        'enrolled_snapshot_count': enrolledCount,
       };
 }
 
@@ -144,6 +191,8 @@ class AttendanceRecord {
   final String? overrideReason;
   final SyncStatus syncStatus;
   final DateTime deviceRecordedAt;
+  final int rowVersion;
+  final int attemptCount;
 
   const AttendanceRecord({
     required this.id,
@@ -157,9 +206,13 @@ class AttendanceRecord {
     this.overrideReason,
     this.syncStatus = SyncStatus.pending,
     required this.deviceRecordedAt,
+    this.rowVersion = 1,
+    this.attemptCount = 0,
   });
 
-  bool get isLocked => biometricVerified && (status == AttendanceStatus.present || status == AttendanceStatus.late);
+  bool get isLocked =>
+      biometricVerified &&
+      (status == AttendanceStatus.present || status == AttendanceStatus.late);
 
   AttendanceRecord copyWith({
     AttendanceStatus? status,
@@ -169,6 +222,8 @@ class AttendanceRecord {
     String? overrideReason,
     SyncStatus? syncStatus,
     DateTime? deviceRecordedAt,
+    int? rowVersion,
+    int? attemptCount,
   }) =>
       AttendanceRecord(
         id: id,
@@ -182,9 +237,12 @@ class AttendanceRecord {
         overrideReason: overrideReason ?? this.overrideReason,
         syncStatus: syncStatus ?? this.syncStatus,
         deviceRecordedAt: deviceRecordedAt ?? this.deviceRecordedAt,
+        rowVersion: rowVersion ?? this.rowVersion,
+        attemptCount: attemptCount ?? this.attemptCount,
       );
 
-  factory AttendanceRecord.fromMap(Map<String, dynamic> map) => AttendanceRecord(
+  factory AttendanceRecord.fromMap(Map<String, dynamic> map) =>
+      AttendanceRecord(
         id: map['id'] as String,
         sessionId: map['session_id'] as String,
         lectureId: map['lecture_id'] as String,
@@ -198,6 +256,8 @@ class AttendanceRecord {
         overrideReason: map['override_reason'] as String?,
         syncStatus: SyncStatus.values.byName(map['sync_status'] as String),
         deviceRecordedAt: DateTime.parse(map['device_recorded_at'] as String),
+        rowVersion: (map['row_version'] as int?) ?? 1,
+        attemptCount: (map['attempt_count'] as int?) ?? 0,
       );
 
   Map<String, dynamic> toSqliteMap() => {
@@ -212,10 +272,11 @@ class AttendanceRecord {
         'override_reason': overrideReason,
         'sync_status': syncStatus.name,
         'device_recorded_at': deviceRecordedAt.toIso8601String(),
+        'row_version': rowVersion,
+        'attempt_count': attemptCount,
       };
 
   Map<String, dynamic> toSupabasePayload() => {
-        'id': id,
         'session_id': sessionId,
         'lecture_id': lectureId,
         'student_id': studentId,

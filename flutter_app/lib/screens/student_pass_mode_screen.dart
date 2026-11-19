@@ -3,22 +3,53 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/attendance_models.dart';
 import '../providers/lecture_guard_providers.dart';
+import '../services/pass_mode_lock_service.dart';
 import '../services/sync_engine_service.dart';
 import '../widgets/pin_exit_dialog.dart';
 
 class StudentPassModeScreen extends ConsumerStatefulWidget {
-  const StudentPassModeScreen({super.key});
+  final bool authGateManaged;
+
+  const StudentPassModeScreen({
+    super.key,
+    this.authGateManaged = false,
+  });
 
   @override
   ConsumerState<StudentPassModeScreen> createState() =>
       _StudentPassModeScreenState();
 }
 
-class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
+class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
+    with WidgetsBindingObserver {
   static const double _rowExtent = 74.0;
   static const List<String> _alphabet = [
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+    'A',
+    'B',
+    'C',
+    'D',
+    'E',
+    'F',
+    'G',
+    'H',
+    'I',
+    'J',
+    'K',
+    'L',
+    'M',
+    'N',
+    'O',
+    'P',
+    'Q',
+    'R',
+    'S',
+    'T',
+    'U',
+    'V',
+    'W',
+    'X',
+    'Y',
+    'Z',
   ];
 
   final ScrollController _scrollController = ScrollController();
@@ -26,19 +57,50 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
   String _searchQuery = '';
   String? _activeJumpLetter;
   bool _unlockedForExit = false;
+  bool _busy = false;
+  String? _busyStudentId;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _engagePassModeLock();
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      _engagePassModeLock();
+    }
+  }
+
+  Future<void> _engagePassModeLock() async {
+    if (ref.read(lectureSessionProvider).activeSession?.isLockedPassMode !=
+        true) {
+      return;
+    }
+    try {
+      await PassModeLockService().start();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not enable screen pinning: $error')),
+        );
+      }
+    }
   }
 
   Future<void> _handleExitAttempt() async {
@@ -48,30 +110,130 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
       pinService: pinService,
     );
     if (verified && mounted) {
-      setState(() => _unlockedForExit = true);
-      Navigator.of(context).pop();
+      try {
+        await PassModeLockService().stop();
+        await ref.read(lectureSessionProvider.notifier).unlockPassMode();
+        if (!mounted) return;
+        setState(() => _unlockedForExit = true);
+        if (!widget.authGateManaged) Navigator.of(context).pop();
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not unlock Pass Mode: $error')),
+          );
+        }
+      }
     }
   }
 
   Future<void> _onStudentTap(Student student) async {
-    final result = await ref
-        .read(lectureSessionProvider.notifier)
-        .checkInStudentWithBiometrics(student);
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _busyStudentId = student.id;
+    });
 
-    if (!mounted) return;
-    if (result.verified) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${student.displayName} verified (${result.method})'),
-          backgroundColor: const Color(0xFF15803D),
-          duration: const Duration(milliseconds: 1200),
+    try {
+      final result = await ref
+          .read(lectureSessionProvider.notifier)
+          .checkInStudentWithBiometrics(student);
+
+      if (!mounted) return;
+      if (result.verified) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${student.displayName} verified (${result.method})'),
+            backgroundColor: const Color(0xFF15803D),
+            duration: const Duration(milliseconds: 1200),
+          ),
+        );
+      } else if (result.method == 'unavailable') {
+        await _offerPinProtectedCheckIn(student, result.errorMessage);
+      } else if (result.errorMessage != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.errorMessage!),
+            backgroundColor: const Color(0xFFB91C1C),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not check in ${student.displayName}: $error'),
+            backgroundColor: const Color(0xFFB91C1C),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _busyStudentId = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _offerPinProtectedCheckIn(
+    Student student,
+    String? biometricMessage,
+  ) async {
+    final useOverride = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Biometrics unavailable'),
+        content: Text(
+          biometricMessage ??
+              'No biometrics are enrolled. A teacher can check in this student with the lecturer PIN.',
         ),
-      );
-    } else if (result.errorMessage != null) {
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Teacher PIN'),
+          ),
+        ],
+      ),
+    );
+    if (useOverride != true || !mounted) return;
+
+    final verified = await showLecturerPinVerificationDialog(
+      context: context,
+      pinService: ref.read(pinSecurityProvider),
+      title: 'Teacher check-in override',
+      message:
+          'Enter the lecturer PIN to check in ${student.displayName} without biometric verification.',
+      confirmLabel: 'Verify & Check In',
+    );
+    if (!verified || !mounted) return;
+
+    final sessionState = ref.read(lectureSessionProvider);
+    final session = sessionState.activeSession;
+    final lecture = sessionState.activeLecture;
+    if (session == null || lecture == null) {
+      throw StateError('There is no active attendance session.');
+    }
+    final elapsedMinutes =
+        DateTime.now().difference(session.startedAt).inMinutes;
+    final status = elapsedMinutes > lecture.lateGraceMinutes
+        ? AttendanceStatus.late
+        : AttendanceStatus.present;
+    await ref.read(lectureSessionProvider.notifier).teacherOverrideStatus(
+          student: student,
+          status: status,
+          reason: 'Lecturer PIN override because biometrics are unavailable.',
+        );
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(result.errorMessage!),
-          backgroundColor: const Color(0xFFB91C1C),
+          content: Text('${student.displayName} checked in by lecturer PIN.'),
+          backgroundColor: const Color(0xFF15803D),
         ),
       );
     }
@@ -128,14 +290,11 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
 
     final letterIndexMap = _buildLetterIndexMap(visibleRoster);
 
-    return PopScope(
-      canPop: _unlockedForExit,
-      onPopInvokedWithResult: (didPop, _) async {
-        if (!didPop) {
-          await _handleExitAttempt();
-        }
-      },
+    return PassModePopGuard(
+      canPop: !widget.authGateManaged && _unlockedForExit,
+      onBlockedPop: _handleExitAttempt,
       child: Scaffold(
+        key: const Key('student-pass-mode-screen'),
         backgroundColor: const Color(0xFFF8FAFC),
         appBar: AppBar(
           automaticallyImplyLeading: false,
@@ -146,7 +305,8 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
             children: [
               Text(
                 lecture?.title ?? 'Student Pass Mode',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
               ),
               Text(
                 'Checked In: ${sessionState.checkedInCount}/${sessionState.enrolledCount} · ${_networkLabel(sessionState.networkTransport)}',
@@ -185,7 +345,8 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
                           },
                         )
                       : null,
-                  hintText: 'Type 2+ characters to filter (${sessionState.enrolledCount} enrolled)...',
+                  hintText:
+                      'Type 2+ characters to filter (${sessionState.enrolledCount} enrolled)...',
                   isDense: true,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(10),
@@ -213,17 +374,19 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
                         : ListView.builder(
                             controller: _scrollController,
                             itemExtent: _rowExtent,
-                            cacheExtent: _rowExtent * 12,
                             padding: const EdgeInsets.symmetric(vertical: 6),
                             itemCount: visibleRoster.length,
                             itemBuilder: (context, index) {
                               final student = visibleRoster[index];
-                              final record = sessionState.recordsByStudentId[student.id];
+                              final record =
+                                  sessionState.recordsByStudentId[student.id];
                               final isLocked = record?.isLocked ?? false;
-                              final isLate = record?.status == AttendanceStatus.late;
+                              final isLate =
+                                  record?.status == AttendanceStatus.late;
 
                               return Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 4),
                                 child: Material(
                                   color: isLocked
                                       ? (isLate
@@ -232,10 +395,13 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
                                       : Colors.white,
                                   borderRadius: BorderRadius.circular(12),
                                   child: InkWell(
-                                    onTap: isLocked ? null : () => _onStudentTap(student),
+                                    onTap: isLocked || _busy
+                                        ? null
+                                        : () => _onStudentTap(student),
                                     borderRadius: BorderRadius.circular(12),
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 14),
                                       decoration: BoxDecoration(
                                         borderRadius: BorderRadius.circular(12),
                                         border: Border.all(
@@ -246,30 +412,45 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
                                       ),
                                       child: Row(
                                         children: [
-                                          Icon(
-                                            isLocked ? Icons.verified_user : Icons.fingerprint,
-                                            color: isLocked
-                                                ? (isLate
-                                                    ? const Color(0xFF15803D)
-                                                    : Colors.white)
-                                                : const Color(0xFF0F172A),
-                                          ),
+                                          if (_busyStudentId == student.id)
+                                            const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          else
+                                            Icon(
+                                              isLocked
+                                                  ? Icons.verified_user
+                                                  : Icons.fingerprint,
+                                              color: isLocked
+                                                  ? (isLate
+                                                      ? const Color(0xFF15803D)
+                                                      : Colors.white)
+                                                  : const Color(0xFF0F172A),
+                                            ),
                                           const SizedBox(width: 12),
                                           Expanded(
                                             child: Column(
-                                              mainAxisAlignment: MainAxisAlignment.center,
-                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.center,
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
                                               children: [
                                                 Text(
                                                   student.fullName,
                                                   maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
                                                   style: TextStyle(
                                                     fontWeight: FontWeight.w700,
                                                     fontSize: 14,
                                                     color: isLocked && !isLate
                                                         ? Colors.white
-                                                        : const Color(0xFF0F172A),
+                                                        : const Color(
+                                                            0xFF0F172A),
                                                   ),
                                                 ),
                                                 Text(
@@ -279,12 +460,15 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
                                                           : 'Locked · Present')
                                                       : '${student.studentCode} · Gr ${student.gradeLevel}',
                                                   maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
                                                   style: TextStyle(
                                                     fontSize: 12,
                                                     color: isLocked && !isLate
-                                                        ? const Color(0xFFDCFCE7)
-                                                        : const Color(0xFF64748B),
+                                                        ? const Color(
+                                                            0xFFDCFCE7)
+                                                        : const Color(
+                                                            0xFF64748B),
                                                   ),
                                                 ),
                                               ],
@@ -327,21 +511,25 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
                           },
                           child: Container(
                             width: 32,
-                            margin: const EdgeInsets.only(right: 4, top: 6, bottom: 6),
+                            margin: const EdgeInsets.only(
+                                right: 4, top: 6, bottom: 6),
                             decoration: BoxDecoration(
                               color: Colors.white,
                               borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: const Color(0xFFE2E8F0)),
+                              border:
+                                  Border.all(color: const Color(0xFFE2E8F0)),
                             ),
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               children: _alphabet.map((letter) {
-                                final hasStudents = letterIndexMap.containsKey(letter);
+                                final hasStudents =
+                                    letterIndexMap.containsKey(letter);
                                 final isActive = _activeJumpLetter == letter;
                                 return Expanded(
                                   child: InkWell(
                                     onTap: hasStudents
-                                        ? () => _jumpToLetter(letter, letterIndexMap)
+                                        ? () => _jumpToLetter(
+                                            letter, letterIndexMap)
                                         : null,
                                     child: Center(
                                       child: Text(
@@ -375,4 +563,26 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen> {
       ),
     );
   }
+}
+
+class PassModePopGuard extends StatelessWidget {
+  final bool canPop;
+  final Future<void> Function() onBlockedPop;
+  final Widget child;
+
+  const PassModePopGuard({
+    super.key,
+    required this.canPop,
+    required this.onBlockedPop,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+        canPop: canPop,
+        onPopInvokedWithResult: (didPop, _) async {
+          if (!didPop) await onBlockedPop();
+        },
+        child: child,
+      );
 }

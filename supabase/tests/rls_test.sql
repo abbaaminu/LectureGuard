@@ -1,0 +1,298 @@
+\set ON_ERROR_STOP on
+
+-- Run with psql against a disposable PostgreSQL 16 database:
+--   psql -X -v ON_ERROR_STOP=1 -d lectureguard_test -f supabase/tests/rls_test.sql
+-- Roles are cluster-wide, so create them before the test transaction.
+DO $$
+BEGIN
+  CREATE ROLE anon NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END;
+$$;
+DO $$
+BEGIN
+  CREATE ROLE authenticated NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END;
+$$;
+
+BEGIN;
+
+DO $$
+BEGIN
+  IF current_setting('server_version_num')::integer / 10000 <> 16 THEN
+    RAISE EXCEPTION 'rls_test.sql requires PostgreSQL 16';
+  END IF;
+END;
+$$;
+
+CREATE SCHEMA auth;
+CREATE TABLE auth.users (
+  id uuid PRIMARY KEY,
+  email text,
+  raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE FUNCTION auth.uid()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid
+$$;
+GRANT USAGE ON SCHEMA auth TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
+
+\ir ../migrations/001_lectureguard_schema.sql
+\ir ../migrations/002_fix_rls_and_views.sql
+
+DO $$
+BEGIN
+  IF (
+    SELECT column_default IS NOT NULL
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'attendance_sessions'
+      AND column_name = 'session_date'
+  ) THEN
+    RAISE EXCEPTION 'session_date still has a server-side default';
+  END IF;
+END;
+$$;
+
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT SELECT ON public.profiles, public.students, public.lectures, public.enrollments,
+  public.attendance_sessions, public.attendance_records
+  TO anon, authenticated;
+GRANT INSERT, UPDATE, DELETE ON public.profiles, public.students, public.lectures,
+  public.enrollments, public.attendance_sessions, public.attendance_records
+  TO authenticated;
+
+INSERT INTO auth.users (id, email, raw_user_meta_data) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'admin@example.test', '{"full_name":"Admin"}'),
+  ('00000000-0000-0000-0000-000000000002', 'teacher1@example.test', '{"full_name":"Teacher One"}'),
+  ('00000000-0000-0000-0000-000000000003', 'teacher2@example.test', '{"full_name":"Teacher Two"}'),
+  ('00000000-0000-0000-0000-000000000004', 'student1@example.test', '{"full_name":"Student One"}'),
+  ('00000000-0000-0000-0000-000000000005', 'student2@example.test', '{"full_name":"Student Two"}');
+
+UPDATE public.profiles SET role = 'admin'
+WHERE id = '00000000-0000-0000-0000-000000000001';
+UPDATE public.profiles SET role = 'teacher'
+WHERE id IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003');
+
+INSERT INTO public.students (id, profile_id, student_code, first_name, last_name, grade_level, homeroom)
+VALUES
+  ('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000004',
+   'STU-1', 'Student', 'One', 13, 'A'),
+  ('10000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000005',
+   'STU-2', 'Student', 'Two', 8, 'B');
+
+INSERT INTO public.lectures (id, course_code, title, teacher_id, room_number, period_number, academic_term)
+VALUES
+  ('20000000-0000-0000-0000-000000000001', 'BIO-1', 'Biology One',
+   '00000000-0000-0000-0000-000000000002', 'A1', 11, '2026-T1'),
+  ('20000000-0000-0000-0000-000000000002', 'BIO-2', 'Biology Two',
+   '00000000-0000-0000-0000-000000000003', 'B1', 1, '2026-T1');
+
+INSERT INTO public.enrollments (lecture_id, student_id) VALUES
+  ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001'),
+  ('20000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002');
+
+INSERT INTO public.attendance_sessions (id, lecture_id, teacher_id, session_date, device_id)
+SELECT
+  ('30000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid,
+  '20000000-0000-0000-0000-000000000001',
+  '00000000-0000-0000-0000-000000000002',
+  DATE '2026-10-01' + (n - 1),
+  'device-1'
+FROM generate_series(1, 5) AS n;
+INSERT INTO public.attendance_sessions (id, lecture_id, teacher_id, session_date, device_id)
+VALUES
+  ('30000000-0000-0000-0000-000000000006', '20000000-0000-0000-0000-000000000002',
+   '00000000-0000-0000-0000-000000000003', DATE '2026-10-01', 'device-2');
+
+INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
+SELECT ats.id, ats.lecture_id, '10000000-0000-0000-0000-000000000001', 'present'
+FROM public.attendance_sessions AS ats
+WHERE ats.lecture_id = '20000000-0000-0000-0000-000000000001'
+  AND ats.session_date <= DATE '2026-10-03';
+INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
+VALUES (
+  '30000000-0000-0000-0000-000000000006',
+  '20000000-0000-0000-0000-000000000002',
+  '10000000-0000-0000-0000-000000000002',
+  'present'
+);
+
+-- Trigger-created accounts are always students and have a usable profile row.
+INSERT INTO auth.users (id, email, raw_user_meta_data)
+VALUES ('00000000-0000-0000-0000-000000000006', 'newstudent@example.test', '{}');
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = '00000000-0000-0000-0000-000000000006'
+      AND role = 'student'
+      AND full_name = 'newstudent'
+  ) THEN
+    RAISE EXCEPTION 'auth.users trigger did not create the expected student profile';
+  END IF;
+END;
+$$;
+
+-- Anonymous clients cannot select either view, even though table grants below
+-- deliberately allow testing that the view ACL itself blocks access.
+DO $$
+BEGIN
+  IF has_table_privilege('anon', 'public.v_student_attendance_summary', 'SELECT')
+     OR has_table_privilege('anon', 'public.v_teacher_submission_logs', 'SELECT') THEN
+    RAISE EXCEPTION 'anon unexpectedly has view SELECT privilege';
+  END IF;
+END;
+$$;
+
+SET ROLE anon;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM public.profiles) <> 0
+     OR (SELECT count(*) FROM public.students) <> 0
+     OR (SELECT count(*) FROM public.lectures) <> 0
+     OR (SELECT count(*) FROM public.enrollments) <> 0
+     OR (SELECT count(*) FROM public.attendance_sessions) <> 0
+     OR (SELECT count(*) FROM public.attendance_records) <> 0 THEN
+    RAISE EXCEPTION 'anon unexpectedly read table rows';
+  END IF;
+  BEGIN
+    PERFORM * FROM public.v_student_attendance_summary;
+    RAISE EXCEPTION 'anon unexpectedly read the student summary view';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM * FROM public.v_teacher_submission_logs;
+    RAISE EXCEPTION 'anon unexpectedly read the teacher logs view';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END;
+$$;
+RESET ROLE;
+
+-- Student 1 sees only their own rows; missing attendance records count as absent.
+SET ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000004', true);
+DO $$
+DECLARE
+  summary record;
+BEGIN
+  IF (SELECT count(*) FROM public.students) <> 1
+     OR (SELECT count(*) FROM public.lectures) <> 1
+     OR (SELECT count(*) FROM public.enrollments) <> 1
+     OR (SELECT count(*) FROM public.attendance_sessions) <> 5
+     OR (SELECT count(*) FROM public.attendance_records) <> 3
+     OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 5 THEN
+    RAISE EXCEPTION 'student can see rows outside their enrolled class';
+  END IF;
+
+  SELECT * INTO summary
+  FROM public.v_student_attendance_summary
+  WHERE student_id = '10000000-0000-0000-0000-000000000001';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'student summary row is missing';
+  END IF;
+  IF summary.total_sessions <> 5
+     OR summary.attended_sessions <> 3
+     OR summary.unexcused_absences <> 2
+     OR summary.attendance_percentage <> 60.0
+     OR NOT summary.chronic_absenteeism_flag THEN
+    RAISE EXCEPTION 'missing records were not counted as absences: %', row_to_json(summary);
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.v_student_attendance_summary
+    WHERE student_id <> '10000000-0000-0000-0000-000000000001'
+  ) THEN
+    RAISE EXCEPTION 'student can see another student summary';
+  END IF;
+END;
+$$;
+RESET ROLE;
+
+-- Teacher 1 sees only their assigned class and may not write records against
+-- another teacher's session/lecture or an unenrolled student.
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000002', true);
+SET ROLE authenticated;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM public.students) <> 1
+     OR (SELECT count(*) FROM public.lectures) <> 1
+     OR (SELECT count(*) FROM public.enrollments) <> 1
+     OR (SELECT count(*) FROM public.attendance_sessions) <> 5
+     OR (SELECT count(*) FROM public.attendance_records) <> 3
+     OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 5 THEN
+    RAISE EXCEPTION 'teacher can see rows outside their assigned class';
+  END IF;
+
+  INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
+  VALUES (
+    '30000000-0000-0000-0000-000000000004',
+    '20000000-0000-0000-0000-000000000001',
+    '10000000-0000-0000-0000-000000000001',
+    'late'
+  );
+
+  BEGIN
+    INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
+    VALUES (
+      '30000000-0000-0000-0000-000000000006',
+      '20000000-0000-0000-0000-000000000001',
+      '10000000-0000-0000-0000-000000000001',
+      'late'
+    );
+    RAISE EXCEPTION 'teacher wrote a record against another teacher session';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
+    VALUES (
+      '30000000-0000-0000-0000-000000000001',
+      '20000000-0000-0000-0000-000000000001',
+      '10000000-0000-0000-0000-000000000002',
+      'late'
+    );
+    RAISE EXCEPTION 'teacher wrote a record for a student not enrolled in their class';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END;
+$$;
+RESET ROLE;
+
+-- Admin access remains school-wide and can insert/update profiles.
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000001', true);
+SET ROLE authenticated;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM public.students) <> 2
+     OR (SELECT count(*) FROM public.lectures) <> 2
+     OR (SELECT count(*) FROM public.enrollments) <> 2
+     OR (SELECT count(*) FROM public.attendance_sessions) <> 6
+     OR (SELECT count(*) FROM public.v_student_attendance_summary) <> 2
+     OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 6 THEN
+    RAISE EXCEPTION 'admin cannot see school-wide data';
+  END IF;
+
+  INSERT INTO public.profiles (id, full_name, email, role)
+  VALUES (
+    '00000000-0000-0000-0000-000000000006',
+    'New Student Updated',
+    'newstudent@example.test',
+    'student'
+  )
+  ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name;
+  IF (SELECT full_name FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000006') <> 'New Student Updated' THEN
+    RAISE EXCEPTION 'admin profile insert/update policy failed';
+  END IF;
+END;
+$$;
+RESET ROLE;
+
+ROLLBACK;
+\echo 'rls_test.sql passed'

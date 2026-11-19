@@ -46,11 +46,20 @@ class BiometricService {
         return const BiometricVerificationResult(
           verified: false,
           method: 'unavailable',
-          errorMessage: 'Biometric hardware not enrolled on this device.',
+          errorMessage:
+              'Biometric verification is unavailable or not enrolled on this device.',
         );
       }
 
       final types = await getEnrolledTypes();
+      if (types.isEmpty) {
+        return const BiometricVerificationResult(
+          verified: false,
+          method: 'unavailable',
+          errorMessage:
+              'No biometrics are enrolled. A teacher can check in the student with the lecturer PIN.',
+        );
+      }
       final methodLabel = types.contains(BiometricType.face)
           ? 'face_id'
           : types.contains(BiometricType.fingerprint)
@@ -70,14 +79,27 @@ class BiometricService {
       return BiometricVerificationResult(
         verified: didAuthenticate,
         method: methodLabel,
-        errorMessage: didAuthenticate ? null : 'Biometric verification cancelled.',
+        errorMessage:
+            didAuthenticate ? null : 'Biometric verification cancelled.',
       );
     } on PlatformException catch (e) {
       String message = 'Biometric check failed.';
-      if (e.code == auth_error.lockedOut || e.code == auth_error.permanentlyLockedOut) {
-        message = 'Sensor temporarily locked due to too many failed attempts.';
+      if (e.code == auth_error.lockedOut ||
+          e.code == auth_error.permanentlyLockedOut) {
+        return const BiometricVerificationResult(
+          verified: false,
+          method: 'unavailable',
+          errorMessage:
+              'The biometric sensor is locked. A teacher can check in the student with the lecturer PIN.',
+        );
       } else if (e.code == auth_error.notEnrolled) {
         message = 'No biometrics enrolled on this device.';
+        return BiometricVerificationResult(
+          verified: false,
+          method: 'unavailable',
+          errorMessage:
+              '$message A teacher can check in the student with the lecturer PIN.',
+        );
       }
       return BiometricVerificationResult(
         verified: false,

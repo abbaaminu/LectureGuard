@@ -2,13 +2,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import '../models/attendance_models.dart';
+import '../services/auth_service.dart';
 import '../services/biometric_service.dart';
 import '../services/local_database_service.dart';
 import '../services/pin_security_service.dart';
+import '../services/session_ids.dart';
 import '../services/sync_engine_service.dart';
 
 final localDatabaseProvider = Provider<LocalDatabaseService>((ref) {
   return LocalDatabaseService();
+});
+
+final authServiceProvider = Provider<AuthService>((ref) {
+  return AuthService();
 });
 
 final biometricServiceProvider = Provider<BiometricService>((ref) {
@@ -30,50 +36,72 @@ final syncEngineProvider = Provider<SyncEngineService>((ref) {
 class SessionState {
   final Lecture? activeLecture;
   final AttendanceSession? activeSession;
+  final List<Lecture> availableLectures;
   final List<Student> roster;
   final Map<String, AttendanceRecord> recordsByStudentId;
   final int pendingSyncCount;
   final bool isSyncing;
+  final bool isRestoring;
   final NetworkTransport networkTransport;
   final SyncProgress? syncProgress;
 
   const SessionState({
     this.activeLecture,
     this.activeSession,
+    this.availableLectures = const [],
     this.roster = const [],
     this.recordsByStudentId = const {},
     this.pendingSyncCount = 0,
     this.isSyncing = false,
+    this.isRestoring = false,
     this.networkTransport = NetworkTransport.offline,
     this.syncProgress,
   });
 
   int get enrolledCount => roster.length;
   int get checkedInCount => recordsByStudentId.values
-      .where((r) => r.status == AttendanceStatus.present || r.status == AttendanceStatus.late)
+      .where((r) =>
+          r.status == AttendanceStatus.present ||
+          r.status == AttendanceStatus.late)
       .length;
-  int get absentCount => enrolledCount - checkedInCount;
+  int get absentCount => roster.where((student) {
+        final record = recordsByStudentId[student.id];
+        return record == null || record.status == AttendanceStatus.absent;
+      }).length;
 
   SessionState copyWith({
     Lecture? activeLecture,
     AttendanceSession? activeSession,
+    List<Lecture>? availableLectures,
     List<Student>? roster,
     Map<String, AttendanceRecord>? recordsByStudentId,
     int? pendingSyncCount,
     bool? isSyncing,
+    bool? isRestoring,
     NetworkTransport? networkTransport,
     SyncProgress? syncProgress,
     bool clearSyncProgress = false,
+    bool clearActiveLecture = false,
+    bool clearActiveSession = false,
+    bool clearRoster = false,
+    bool clearRecords = false,
   }) =>
       SessionState(
-        activeLecture: activeLecture ?? this.activeLecture,
-        activeSession: activeSession ?? this.activeSession,
-        roster: roster ?? this.roster,
-        recordsByStudentId: recordsByStudentId ?? this.recordsByStudentId,
+        activeLecture:
+            clearActiveLecture ? null : (activeLecture ?? this.activeLecture),
+        activeSession:
+            clearActiveSession ? null : (activeSession ?? this.activeSession),
+        availableLectures: availableLectures ?? this.availableLectures,
+        roster: clearRoster ? const [] : (roster ?? this.roster),
+        recordsByStudentId: clearRecords
+            ? const {}
+            : (recordsByStudentId ?? this.recordsByStudentId),
         pendingSyncCount: pendingSyncCount ?? this.pendingSyncCount,
         isSyncing: isSyncing ?? this.isSyncing,
+        isRestoring: isRestoring ?? this.isRestoring,
         networkTransport: networkTransport ?? this.networkTransport,
-        syncProgress: clearSyncProgress ? null : (syncProgress ?? this.syncProgress),
+        syncProgress:
+            clearSyncProgress ? null : (syncProgress ?? this.syncProgress),
       );
 }
 
@@ -82,43 +110,149 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   final BiometricService _biometrics;
   final SyncEngineService _syncEngine;
   final _uuid = const Uuid();
+  late final Future<void> initialization;
+  bool _disposed = false;
 
   LectureSessionNotifier(this._db, this._biometrics, this._syncEngine)
       : super(const SessionState()) {
-    _bindConnectivityAutoSync();
+    initialization = _initialize();
   }
 
-  void _bindConnectivityAutoSync() {
-    Future.microtask(() async {
-      final initialTransport = await _syncEngine.currentTransport();
-      final pendingCount = await _db.getPendingSyncCount();
-      state = state.copyWith(
-        networkTransport: initialTransport,
-        pendingSyncCount: pendingCount,
-      );
+  void _setState(SessionState Function(SessionState current) update) {
+    if (!_disposed) state = update(state);
+  }
 
-      _syncEngine.startAutoSyncListener(
-        onConnectivityChanged: (transport) {
-          state = state.copyWith(networkTransport: transport);
-        },
-        onBatchProgress: (progress) {
-          state = state.copyWith(
-            isSyncing: true,
-            syncProgress: progress,
-            pendingSyncCount: progress.totalQueued - progress.uploadedCount,
-          );
-        },
-        onSyncComplete: (result) async {
-          final remaining = await _db.getPendingSyncCount();
-          state = state.copyWith(
-            isSyncing: false,
-            pendingSyncCount: remaining,
-            networkTransport: result.transport,
-            clearSyncProgress: true,
-          );
-        },
-      );
-    });
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  Future<void> _initialize() async {
+    final initialTransport = await _syncEngine.currentTransport();
+    final pendingCount = await _db.getPendingSyncCount();
+    _setState((current) => current.copyWith(
+          networkTransport: initialTransport,
+          pendingSyncCount: pendingCount,
+        ));
+    if (_disposed) return;
+
+    _syncEngine.startAutoSyncListener(
+      onConnectivityChanged: (transport) {
+        _setState((current) => current.copyWith(
+              networkTransport: transport,
+            ));
+      },
+      onBatchProgress: (progress) {
+        _setState((current) => current.copyWith(
+              isSyncing: true,
+              syncProgress: progress,
+              pendingSyncCount: progress.totalQueued - progress.uploadedCount,
+            ));
+      },
+      onSyncComplete: (result) async {
+        final remaining = await _db.getPendingSyncCount();
+        _setState((current) => current.copyWith(
+              isSyncing: false,
+              pendingSyncCount: remaining,
+              networkTransport: result.transport,
+              clearSyncProgress: true,
+            ));
+      },
+    );
+  }
+
+  Future<void> loadTeacherLectures() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) {
+      throw StateError('Sign in before loading assigned classes.');
+    }
+
+    if (await _syncEngine.isOnline()) {
+      final rows = await Supabase.instance.client
+          .from('lectures')
+          .select()
+          .eq('teacher_id', userId)
+          .order('period_number');
+      final lectures = rows.map((row) => Lecture.fromMap(row)).toList();
+      await _db.cacheLectures(lectures);
+      _setState((current) => current.copyWith(availableLectures: lectures));
+    } else {
+      final lectures = await _db.getCachedLectures(teacherId: userId);
+      _setState((current) => current.copyWith(availableLectures: lectures));
+    }
+  }
+
+  Future<List<Student>> loadLectureRoster(Lecture lecture) async {
+    if (await _syncEngine.isOnline()) {
+      final rows = await Supabase.instance.client
+          .from('enrollments')
+          .select(
+              'students(id, student_code, first_name, last_name, grade_level, homeroom)')
+          .eq('lecture_id', lecture.id)
+          .eq('active', true);
+      final students = rows
+          .map((row) => row['students'])
+          .whereType<Map<String, dynamic>>()
+          .map(Student.fromMap)
+          .toList();
+      await _db.cacheLectureRoster(lecture, students);
+      return _db.getAlphabeticalRoster(lecture.id);
+    }
+    return _db.getAlphabeticalRoster(lecture.id);
+  }
+
+  void selectLecture(Lecture lecture, List<Student> students) {
+    if (state.activeSession?.endedAt == null && state.activeSession != null) {
+      throw StateError('End the active session before changing classes.');
+    }
+    _setState((current) => current.copyWith(
+          activeLecture: lecture,
+          roster: students,
+          recordsByStudentId: const {},
+          clearActiveSession: true,
+        ));
+  }
+
+  Future<void> restoreActiveSession(String teacherId) async {
+    _setState((current) => current.copyWith(
+          isRestoring: true,
+          clearActiveLecture: true,
+          clearActiveSession: true,
+          clearRoster: true,
+          clearRecords: true,
+        ));
+    try {
+      final session = await _db.getActiveSession(teacherId);
+      if (session == null) return;
+      final lecture = await _db.getCachedLecture(session.lectureId);
+      if (lecture == null) {
+        throw StateError(
+          'The cached lecture for active session ${session.id} is missing.',
+        );
+      }
+      final roster = await _db.getAlphabeticalRoster(lecture.id);
+      final records = await _db.getSessionRecords(session.id);
+      _setState((current) => current.copyWith(
+            activeLecture: lecture,
+            activeSession: session,
+            roster: roster,
+            recordsByStudentId: {
+              for (final record in records) record.studentId: record,
+            },
+          ));
+    } finally {
+      _setState((current) => current.copyWith(isRestoring: false));
+    }
+  }
+
+  void clearActiveSessionState() {
+    _setState((current) => current.copyWith(
+          clearActiveLecture: true,
+          clearActiveSession: true,
+          clearRoster: true,
+          clearRecords: true,
+        ));
   }
 
   Future<void> startPassModeSession({
@@ -127,28 +261,77 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   }) async {
     await _db.cacheLectureRoster(lecture, students);
     final alphabetical = await _db.getAlphabeticalRoster(lecture.id);
-
-    final session = AttendanceSession(
-      id: _uuid.v4(),
+    final now = DateTime.now();
+    final date = localSessionDate(now);
+    final proposedSession = AttendanceSession(
+      id: deterministicSessionId(lecture.id, date),
       lectureId: lecture.id,
       teacherId: lecture.teacherId,
-      startedAt: DateTime.now(),
-      isLockedPassMode: true,
+      deviceId: _uuid.v4(),
+      sessionDate: date,
+      startedAt: now,
+      isLockedPassMode: false,
       enrolledCount: alphabetical.length,
     );
-    await _db.upsertSession(session);
+    final session = await _db.createSessionIfAbsent(proposedSession);
+    if (session.endedAt != null) {
+      throw StateError('Attendance for this class has already ended today.');
+    }
+    final records = await _db.getSessionRecords(session.id);
 
     final pendingCount = await _db.getPendingSyncCount();
     final transport = await _syncEngine.currentTransport();
 
-    state = SessionState(
-      activeLecture: lecture,
-      activeSession: session,
-      roster: alphabetical,
-      recordsByStudentId: const {},
-      pendingSyncCount: pendingCount,
-      networkTransport: transport,
-    );
+    _setState((current) => SessionState(
+          activeLecture: lecture,
+          activeSession: session,
+          availableLectures: current.availableLectures,
+          roster: alphabetical,
+          recordsByStudentId: {
+            for (final record in records) record.studentId: record,
+          },
+          pendingSyncCount: pendingCount,
+          networkTransport: transport,
+        ));
+  }
+
+  Future<void> lockPassMode() => _setPassModeLocked(true);
+
+  Future<void> unlockPassMode() => _setPassModeLocked(false);
+
+  Future<void> _setPassModeLocked(bool isLocked) async {
+    final session = state.activeSession;
+    if (session == null || session.endedAt != null) {
+      throw StateError('There is no active attendance session.');
+    }
+    await _db.setSessionPassModeLocked(session.id, isLocked: isLocked);
+    final pendingCount = await _db.getPendingSyncCount();
+    _setState((current) => current.copyWith(
+          activeSession: session.copyWith(isLockedPassMode: isLocked),
+          pendingSyncCount: pendingCount,
+        ));
+  }
+
+  Future<SyncResult> endSession() async {
+    final session = state.activeSession;
+    if (session == null) {
+      throw StateError('There is no active attendance session to end.');
+    }
+    if (session.endedAt != null) {
+      throw StateError('This attendance session has already ended.');
+    }
+
+    final endedSession = await _db.endSession(session.id);
+    final records = await _db.getSessionRecords(session.id);
+    final pendingCount = await _db.getPendingSyncCount();
+    _setState((current) => current.copyWith(
+          activeSession: endedSession,
+          recordsByStudentId: {
+            for (final record in records) record.studentId: record,
+          },
+          pendingSyncCount: pendingCount,
+        ));
+    return syncNow();
   }
 
   /// Tapping a student row runs native local_auth and commits to SQLite WAL immediately.
@@ -187,7 +370,8 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
         : AttendanceStatus.present;
 
     final record = AttendanceRecord(
-      id: existing?.id ?? _uuid.v4(),
+      id: existing?.id ??
+          deterministicAttendanceRecordId(session.id, student.id),
       sessionId: session.id,
       lectureId: lecture.id,
       studentId: student.id,
@@ -202,13 +386,14 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     await _db.upsertAttendanceRecord(record);
     final pendingCount = await _db.getPendingSyncCount();
 
-    state = state.copyWith(
-      recordsByStudentId: {
-        ...state.recordsByStudentId,
-        student.id: record,
-      },
-      pendingSyncCount: pendingCount,
-    );
+    _setState((current) => current.copyWith(
+          recordsByStudentId: {
+            ...current.recordsByStudentId,
+            student.id: record,
+          },
+          pendingSyncCount: pendingCount,
+        ));
+    _syncEngine.scheduleDebouncedSync();
 
     return result;
   }
@@ -226,14 +411,16 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     final now = DateTime.now();
 
     final record = AttendanceRecord(
-      id: existing?.id ?? _uuid.v4(),
+      id: existing?.id ??
+          deterministicAttendanceRecordId(session.id, student.id),
       sessionId: session.id,
       lectureId: lecture.id,
       studentId: student.id,
       status: status,
-      checkedInAt: status == AttendanceStatus.present || status == AttendanceStatus.late
-          ? (existing?.checkedInAt ?? now)
-          : null,
+      checkedInAt:
+          status == AttendanceStatus.present || status == AttendanceStatus.late
+              ? (existing?.checkedInAt ?? now)
+              : null,
       biometricVerified: existing?.biometricVerified ?? false,
       biometricMethod: 'manual_override',
       overrideReason: reason,
@@ -244,33 +431,34 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     await _db.upsertAttendanceRecord(record);
     final pendingCount = await _db.getPendingSyncCount();
 
-    state = state.copyWith(
-      recordsByStudentId: {
-        ...state.recordsByStudentId,
-        student.id: record,
-      },
-      pendingSyncCount: pendingCount,
-    );
+    _setState((current) => current.copyWith(
+          recordsByStudentId: {
+            ...current.recordsByStudentId,
+            student.id: record,
+          },
+          pendingSyncCount: pendingCount,
+        ));
+    _syncEngine.scheduleDebouncedSync();
   }
 
   Future<SyncResult> syncNow() async {
-    state = state.copyWith(isSyncing: true);
+    _setState((current) => current.copyWith(isSyncing: true));
     final result = await _syncEngine.syncPendingRecords(
       onBatchProgress: (progress) {
-        state = state.copyWith(
-          isSyncing: true,
-          syncProgress: progress,
-          pendingSyncCount: progress.totalQueued - progress.uploadedCount,
-        );
+        _setState((current) => current.copyWith(
+              isSyncing: true,
+              syncProgress: progress,
+              pendingSyncCount: progress.totalQueued - progress.uploadedCount,
+            ));
       },
     );
     final pendingCount = await _db.getPendingSyncCount();
-    state = state.copyWith(
-      isSyncing: false,
-      pendingSyncCount: pendingCount,
-      networkTransport: result.transport,
-      clearSyncProgress: true,
-    );
+    _setState((current) => current.copyWith(
+          isSyncing: false,
+          pendingSyncCount: pendingCount,
+          networkTransport: result.transport,
+          clearSyncProgress: true,
+        ));
     return result;
   }
 }

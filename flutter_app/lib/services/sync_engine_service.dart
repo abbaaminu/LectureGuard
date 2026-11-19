@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../models/attendance_models.dart';
+
 import 'local_database_service.dart';
 
 enum NetworkTransport { offline, wifi, mobile, ethernet }
@@ -43,33 +45,66 @@ class SyncResult {
 class SyncEngineService {
   static const int batchChunkSize = 50;
   static const int maxChunkRetries = 3;
+  static const Duration syncInterval = Duration(seconds: 60);
+  static const Duration _reachabilityTimeout = Duration(seconds: 5);
 
   final LocalDatabaseService _localDb;
   final SupabaseClient _supabase;
-  final Connectivity _connectivity = Connectivity();
+  final Connectivity _connectivity;
+  final Stream<List<ConnectivityResult>>? _connectivityChanges;
+  final Future<List<ConnectivityResult>> Function()? _connectivityCheck;
+  final Future<bool> Function()? _reachabilityCheck;
+  final Duration Function(int attempt) _retryDelay;
+  final HttpClient _httpClient = HttpClient()
+    ..connectionTimeout = _reachabilityTimeout;
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  Timer? _periodicSyncTimer;
+  Timer? _debouncedSyncTimer;
   bool _isSyncing = false;
+  bool _syncRequestedWhileBusy = false;
+  bool _disposed = false;
+  void Function(SyncResult result)? _onAutoSyncComplete;
 
-  SyncEngineService(this._localDb, this._supabase);
+  SyncEngineService(
+    this._localDb,
+    this._supabase, {
+    Connectivity? connectivity,
+    Stream<List<ConnectivityResult>>? connectivityChanges,
+    Future<List<ConnectivityResult>> Function()? connectivityCheck,
+    Future<bool> Function()? reachabilityCheck,
+    Duration Function(int attempt)? retryDelay,
+  })  : _connectivity = connectivity ?? Connectivity(),
+        _connectivityChanges = connectivityChanges,
+        _connectivityCheck = connectivityCheck,
+        _reachabilityCheck = reachabilityCheck,
+        _retryDelay = retryDelay ??
+            ((attempt) => Duration(milliseconds: 500 * attempt * attempt));
 
-  /// Connection-agnostic listener: automatically triggers sync on Mobile Data,
-  /// Wi-Fi, or Ethernet rather than restricting to Wi-Fi only.
+  /// Triggers sync over Wi-Fi, mobile data, and Ethernet.
   void startAutoSyncListener({
     void Function(NetworkTransport transport)? onConnectivityChanged,
     void Function(SyncProgress progress)? onBatchProgress,
     void Function(SyncResult result)? onSyncComplete,
   }) {
+    if (_disposed) return;
+    _onAutoSyncComplete = onSyncComplete;
     _connectivitySub?.cancel();
-    _connectivitySub = _connectivity.onConnectivityChanged.listen((results) async {
+    _connectivitySub =
+        (_connectivityChanges ?? _connectivity.onConnectivityChanged)
+            .listen((results) async {
+      if (_disposed) return;
       final transport = _resolveTransport(results);
       onConnectivityChanged?.call(transport);
-
-      if (transport != NetworkTransport.offline) {
-        final result = await syncPendingRecords(onBatchProgress: onBatchProgress);
-        onSyncComplete?.call(result);
-      }
+      final result = await syncPendingRecords(onBatchProgress: onBatchProgress);
+      if (!_disposed) onSyncComplete?.call(result);
     });
+    unawaited(_refreshPendingTimer());
+    unawaited(
+      syncPendingRecords(onBatchProgress: onBatchProgress).then((result) {
+        if (!_disposed) onSyncComplete?.call(result);
+      }),
+    );
   }
 
   NetworkTransport _resolveTransport(List<ConnectivityResult> results) {
@@ -83,14 +118,14 @@ class SyncEngineService {
       return NetworkTransport.mobile;
     }
     if (results.contains(ConnectivityResult.vpn)) {
-      // VPN wraps an underlying mobile/wifi interface
       return NetworkTransport.mobile;
     }
     return NetworkTransport.offline;
   }
 
   Future<NetworkTransport> currentTransport() async {
-    final results = await _connectivity.checkConnectivity();
+    final results =
+        await (_connectivityCheck?.call() ?? _connectivity.checkConnectivity());
     return _resolveTransport(results);
   }
 
@@ -98,105 +133,178 @@ class SyncEngineService {
     return (await currentTransport()) != NetworkTransport.offline;
   }
 
-  /// Uploads pending SQLite WAL records in resilient 50-record chunks with
-  /// per-chunk retry & immediate SQLite checkpointing after each chunk.
+  void scheduleDebouncedSync({
+    Duration delay = const Duration(seconds: 2),
+  }) {
+    if (_disposed) return;
+    _debouncedSyncTimer?.cancel();
+    _debouncedSyncTimer = Timer(delay, () {
+      if (!_disposed) unawaited(syncPendingRecords());
+    });
+  }
+
+  /// Uploads pending SQLite rows in 50-row chunks, with sessions before records.
   Future<SyncResult> syncPendingRecords({
     void Function(SyncProgress progress)? onBatchProgress,
   }) async {
     final transport = await currentTransport();
-    if (_isSyncing) {
-      final remaining = await _localDb.getPendingSyncCount();
+    if (_disposed) {
       return SyncResult(
         uploadedCount: 0,
-        remainingPendingCount: remaining,
+        remainingPendingCount: await _localDb.getPendingSyncCount(),
         batchesCompleted: 0,
-        success: true,
+        success: false,
         transport: transport,
+        error: 'Sync engine has been disposed.',
+      );
+    }
+    if (_isSyncing) {
+      _syncRequestedWhileBusy = true;
+      return SyncResult(
+        uploadedCount: 0,
+        remainingPendingCount: await _localDb.getPendingSyncCount(),
+        batchesCompleted: 0,
+        success: false,
+        transport: transport,
+        error: 'A sync is already in progress.',
       );
     }
 
     _isSyncing = true;
-    int totalUploaded = 0;
-    int batchesCompleted = 0;
+    var totalUploaded = 0;
+    var batchesCompleted = 0;
+    final errors = <String>[];
 
     try {
       if (transport == NetworkTransport.offline) {
-        final remaining = await _localDb.getPendingSyncCount();
         return SyncResult(
           uploadedCount: 0,
-          remainingPendingCount: remaining,
+          remainingPendingCount: await _localDb.getPendingSyncCount(),
           batchesCompleted: 0,
           success: false,
           transport: NetworkTransport.offline,
-          error: 'Device offline. $remaining records safely queued in SQLite WAL.',
+          error: 'Device offline; attendance remains queued locally.',
         );
+      }
+      if (!await _hasReachability()) {
+        return SyncResult(
+          uploadedCount: 0,
+          remainingPendingCount: await _localDb.getPendingSyncCount(),
+          batchesCompleted: 0,
+          success: false,
+          transport: transport,
+          error: 'Supabase is unreachable; attendance remains queued locally.',
+        );
+      }
+
+      final pendingSessions = await _localDb.getPendingSyncSessions();
+      for (var i = 0; i < pendingSessions.length; i += batchChunkSize) {
+        if (await currentTransport() == NetworkTransport.offline ||
+            !await _hasReachability()) {
+          errors.add('Connection lost before the next session batch.');
+          break;
+        }
+        final chunk = pendingSessions.skip(i).take(batchChunkSize).toList();
+        try {
+          await _upsertChunkWithRetry(
+            'attendance_sessions',
+            chunk.map((session) => session.toSupabasePayload()).toList(),
+            'id',
+          );
+          await _localDb
+              .markSessionsSynced(chunk.map((session) => session.id).toList());
+          batchesCompleted++;
+        } catch (error) {
+          final message = error.toString();
+          await _localDb.markSessionsFailed(
+            chunk.map((session) => session.id).toList(),
+            message,
+          );
+          errors.add('attendance_sessions batch failed: $message');
+        }
       }
 
       final pending = await _localDb.getPendingSyncRecords();
-      if (pending.isEmpty) {
-        return SyncResult(
-          uploadedCount: 0,
-          remainingPendingCount: 0,
-          batchesCompleted: 0,
-          success: true,
-          transport: transport,
-        );
-      }
-
+      final totalQueued = await _localDb.getPendingSyncCount();
       final totalBatches = (pending.length / batchChunkSize).ceil();
-
-      for (int i = 0; i < pending.length; i += batchChunkSize) {
-        // Re-check connection before each cellular/Wi-Fi chunk
+      for (var i = 0; i < pending.length; i += batchChunkSize) {
         final activeTransport = await currentTransport();
-        if (activeTransport == NetworkTransport.offline) {
-          final remaining = await _localDb.getPendingSyncCount();
-          return SyncResult(
-            uploadedCount: totalUploaded,
-            remainingPendingCount: remaining,
-            batchesCompleted: batchesCompleted,
-            success: false,
-            transport: NetworkTransport.offline,
-            error: 'Connection dropped mid-sync. $remaining records remain safely in SQLite WAL.',
-          );
+        if (activeTransport == NetworkTransport.offline ||
+            !await _hasReachability()) {
+          errors.add('Connection lost before the next attendance batch.');
+          break;
         }
 
-        final end = i + batchChunkSize > pending.length
-            ? pending.length
-            : i + batchChunkSize;
-        final chunk = pending.sublist(i, end);
-        final payload = chunk.map((r) => r.toSupabasePayload()).toList();
+        final chunk = pending.skip(i).take(batchChunkSize).toList();
         final chunkIndex = (i ~/ batchChunkSize) + 1;
+        try {
+          await _upsertChunkWithRetry(
+            'attendance_records',
+            chunk.map((record) => record.toSupabasePayload()).toList(),
+            'session_id,student_id',
+          );
+          totalUploaded += await _localDb.markRecordsSynced(chunk);
+        } catch (error) {
+          final message = error.toString();
+          await _localDb.markRecordsFailed(chunk, message);
+          errors.add('attendance_records batch $chunkIndex failed: $message');
+        }
 
-        await _upsertChunkWithRetry(payload);
+        batchesCompleted++;
+        if (!_disposed) {
+          onBatchProgress?.call(
+            SyncProgress(
+              uploadedCount: totalUploaded,
+              totalQueued: totalQueued,
+              currentBatch: chunkIndex,
+              totalBatches: totalBatches,
+              transport: activeTransport,
+            ),
+          );
+        }
+      }
 
-        // Immediately checkpoint synced IDs so intermittent cellular drops
-        // never lose progress or duplicate already-uploaded chunks.
-        final chunkIds = chunk.map((r) => r.id).toList();
-        await _localDb.markRecordsSynced(chunkIds);
-
-        totalUploaded += chunkIds.length;
-        batchesCompleted += 1;
-
-        onBatchProgress?.call(
-          SyncProgress(
-            uploadedCount: totalUploaded,
-            totalQueued: pending.length,
-            currentBatch: chunkIndex,
-            totalBatches: totalBatches,
-            transport: activeTransport,
-          ),
-        );
+      await _localDb.prepareEndedSessionsForSubmission();
+      final submissionUpdates =
+          await _localDb.getPendingSessionSubmissionUpdates();
+      if (submissionUpdates.isNotEmpty) {
+        if (await currentTransport() == NetworkTransport.offline ||
+            !await _hasReachability()) {
+          errors.add('Connection lost before session submission updates.');
+        } else {
+          for (final update in submissionUpdates) {
+            final sessionId = update['id'] as String;
+            final submittedAt = update['submitted_to_cloud_at'] as String;
+            try {
+              await _supabase
+                  .from('attendance_sessions')
+                  .update({'submitted_to_cloud_at': submittedAt})
+                  .eq('id', sessionId)
+                  .timeout(const Duration(seconds: 15));
+              await _localDb.markSessionSubmissionSynced(
+                sessionId,
+                submittedAt,
+              );
+            } catch (error) {
+              final message = error.toString();
+              await _localDb.markSessionsFailed([sessionId], message);
+              errors.add('Session submission update failed: $message');
+            }
+          }
+        }
       }
 
       final remaining = await _localDb.getPendingSyncCount();
+      final pendingWork = await _localDb.getPendingSyncWorkCount();
       return SyncResult(
         uploadedCount: totalUploaded,
         remainingPendingCount: remaining,
         batchesCompleted: batchesCompleted,
-        success: true,
+        success: pendingWork == 0 && errors.isEmpty,
         transport: transport,
+        error: errors.isEmpty ? null : errors.join('; '),
       );
-    } catch (e) {
+    } catch (error) {
       final remaining = await _localDb.getPendingSyncCount();
       return SyncResult(
         uploadedCount: totalUploaded,
@@ -204,34 +312,84 @@ class SyncEngineService {
         batchesCompleted: batchesCompleted,
         success: false,
         transport: transport,
-        error: 'Sync paused after $batchesCompleted batches: $e',
+        error: 'Sync paused after $batchesCompleted batches: $error',
       );
     } finally {
       _isSyncing = false;
+      await _refreshPendingTimer();
+      if (!_disposed && _syncRequestedWhileBusy) {
+        _syncRequestedWhileBusy = false;
+        unawaited(
+          syncPendingRecords(onBatchProgress: onBatchProgress).then((result) {
+            if (!_disposed) _onAutoSyncComplete?.call(result);
+          }),
+        );
+      }
     }
   }
 
-  Future<void> _upsertChunkWithRetry(List<Map<String, dynamic>> payload) async {
+  Future<bool> _hasReachability() async {
+    final check = _reachabilityCheck;
+    if (check != null) return check();
+
+    try {
+      final request = await _httpClient
+          .getUrl(Uri.parse(_supabase.rest.url))
+          .timeout(_reachabilityTimeout);
+      final response = await request.close().timeout(_reachabilityTimeout);
+      await response.drain<void>();
+      return response.statusCode >= 200 && response.statusCode < 500;
+    } on SocketException {
+      return false;
+    } on TimeoutException {
+      return false;
+    } on HttpException {
+      return false;
+    }
+  }
+
+  Future<void> _upsertChunkWithRetry(
+    String table,
+    List<Map<String, dynamic>> payload,
+    String onConflict,
+  ) async {
     Object? lastError;
-    for (int attempt = 1; attempt <= maxChunkRetries; attempt++) {
+    for (var attempt = 1; attempt <= maxChunkRetries; attempt++) {
       try {
         await _supabase
-            .from('attendance_records')
-            .upsert(payload, onConflict: 'session_id,student_id')
+            .from(table)
+            .upsert(payload, onConflict: onConflict)
             .timeout(const Duration(seconds: 15));
         return;
-      } catch (e) {
-        lastError = e;
+      } catch (error) {
+        lastError = error;
         if (attempt < maxChunkRetries) {
-          // Exponential backoff (500ms, 1500ms) for weak cellular signals
-          await Future.delayed(Duration(milliseconds: 500 * attempt * attempt));
+          await Future.delayed(_retryDelay(attempt));
         }
       }
     }
-    throw lastError ?? Exception('Failed to upsert batch chunk.');
+    throw lastError ?? StateError('Failed to upsert batch chunk.');
+  }
+
+  Future<void> _refreshPendingTimer() async {
+    if (_disposed) return;
+    final pendingCount = await _localDb.getPendingSyncWorkCount();
+    if (_disposed) return;
+    if (pendingCount > 0) {
+      _periodicSyncTimer ??= Timer.periodic(syncInterval, (_) {
+        if (!_disposed) unawaited(syncPendingRecords());
+      });
+    } else {
+      _periodicSyncTimer?.cancel();
+      _periodicSyncTimer = null;
+    }
   }
 
   void dispose() {
+    _disposed = true;
+    _periodicSyncTimer?.cancel();
+    _debouncedSyncTimer?.cancel();
+    _httpClient.close(force: true);
     _connectivitySub?.cancel();
   }
 }
