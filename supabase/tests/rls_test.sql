@@ -45,6 +45,7 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
 \ir ../migrations/001_lectureguard_schema.sql
 \ir ../migrations/002_fix_rls_and_views.sql
 \ir ../migrations/003_school_settings_and_analytics.sql
+\ir ../migrations/004_harden_teacher_submission_logs.sql
 
 DO $$
 BEGIN
@@ -147,8 +148,9 @@ BEGIN
 END;
 $$;
 
--- Anonymous clients cannot select either view, even though table grants below
--- deliberately allow testing that the view ACL itself blocks access.
+-- Anonymous clients cannot select either view or execute the staff log
+-- function, even though table grants below deliberately allow testing that the
+-- view ACL itself blocks access.
 DO $$
 BEGIN
   IF has_table_privilege('anon', 'public.v_student_attendance_summary', 'SELECT')
@@ -157,10 +159,15 @@ BEGIN
      OR has_table_privilege('anon', 'public.school_settings', 'SELECT')
      OR has_function_privilege(
        'anon',
+       'public.teacher_submission_logs(integer,integer)',
+       'EXECUTE'
+     )
+     OR has_function_privilege(
+       'anon',
        'public.admin_chronic_absentee_page(text,smallint,date,date)',
        'EXECUTE'
      ) THEN
-    RAISE EXCEPTION 'anon unexpectedly has view SELECT privilege';
+    RAISE EXCEPTION 'anon unexpectedly has view or function privilege';
   END IF;
 END;
 $$;
@@ -211,11 +218,25 @@ BEGIN
      OR (SELECT count(*) FROM public.attendance_sessions) <> 5
      OR own_records <> 3
      OR (SELECT count(*) FROM public.school_settings) <> 1
-     OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 5 THEN
+     OR (SELECT count(*) FROM public.v_student_attendance_summary) <> 1
+     OR (SELECT count(*) FROM public.teacher_submission_logs(1000, 0)) <> 0 THEN
     RAISE EXCEPTION
-      'student can see rows outside their enrolled class (records=%)',
-      own_records;
+      'student can see rows outside their enrolled class (records=%, logs=%)',
+      own_records,
+      (SELECT count(*) FROM public.teacher_submission_logs(1000, 0));
   END IF;
+  -- The submission log view is staff-only; a student must not read it directly
+  -- and the SECURITY DEFINER function must return nothing for them.
+  IF has_table_privilege(
+       current_user, 'public.v_teacher_submission_logs', 'SELECT'
+     ) THEN
+    RAISE EXCEPTION 'authenticated still holds SELECT on the teacher logs view';
+  END IF;
+  BEGIN
+    PERFORM 1 FROM public.v_teacher_submission_logs;
+    RAISE EXCEPTION 'student read the teacher logs view directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
   -- Regression guard for the fixture defect that used to make this file abort:
   -- student 2 has exactly one attendance record and it must stay invisible.
   IF EXISTS (
@@ -267,10 +288,18 @@ BEGIN
      OR (SELECT count(*) FROM public.enrollments) <> 1
      OR (SELECT count(*) FROM public.attendance_sessions) <> 5
      OR own_records <> 3
-     OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 5 THEN
+     OR (SELECT count(*) FROM public.teacher_submission_logs(1000, 0)) <> 5 THEN
     RAISE EXCEPTION
-      'teacher can see rows outside their assigned class (records=%)',
-      own_records;
+      'teacher can see rows outside their assigned class (records=%, logs=%)',
+      own_records,
+      (SELECT count(*) FROM public.teacher_submission_logs(1000, 0));
+  END IF;
+  -- The log function is scoped by session ownership, not by view policies.
+  IF EXISTS (
+    SELECT 1 FROM public.teacher_submission_logs(1000, 0)
+    WHERE course_code <> 'BIO-1'
+  ) THEN
+    RAISE EXCEPTION 'teacher submission log leaked another teacher session';
   END IF;
 
   UPDATE public.school_settings
@@ -347,7 +376,7 @@ BEGIN
      OR (SELECT count(*) FROM public.enrollments) <> 2
      OR (SELECT count(*) FROM public.attendance_sessions) <> 6
      OR (SELECT count(*) FROM public.v_student_attendance_summary) <> 2
-     OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 6 THEN
+     OR (SELECT count(*) FROM public.teacher_submission_logs(1000, 0)) <> 6 THEN
     RAISE EXCEPTION 'admin cannot see school-wide data';
   END IF;
 
