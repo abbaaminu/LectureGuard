@@ -57,6 +57,56 @@ On iPhone and iPad, Guided Access must be enabled and started by the device
 operator, or a school MDM must apply supervised Single App Mode. Pass Mode
 cannot enable Guided Access programmatically.
 
+## Pass Mode device lockdown
+
+Pass Mode is not a kiosk out of the box. On Android the app calls
+`startLockTask()`, and the operating system grants one of two levels:
+
+| Level | How it is granted | Can the operator leave without the PIN? |
+| --- | --- | --- |
+| Screen pinning (`LOCK_TASK_MODE_PINNED`) | The default on a stock device with no device owner. | **Yes.** From Recents: **Unpin** (or Back + Recents) releases the task without asking for the app PIN. |
+| Kiosk (`LOCK_TASK_MODE_LOCKED`) | A device-owner / MDM allow-lists the package with `setLockTaskPackages()`. | No. Only the device owner, or a reboot, leaves the task. |
+
+Because Android screen pinning can be dismissed from Recents, Pass Mode on its
+own is a deterrent, not an anti-cheat control. The app reports the level back to
+Dart and the Pass Mode screen keeps a persistent warning banner visible for the
+whole session whenever the lock did not engage; the banner is not a snackbar and
+does not disappear after a few seconds.
+
+### MDM / device-owner guide (real kiosk)
+
+1. Enroll the attendance tablets as **fully managed devices** and make your MDM
+   app the device owner. (A running app cannot promote itself to device owner;
+   the device must be freshly provisioned or factory reset.)
+2. From the device owner, allow-list the package for lock-task mode, e.g. in your
+   DPC or MDM profile:
+
+   ```java
+   DevicePolicyManager dpm =
+       (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+   dpm.setLockTaskPackages(adminComponent, new String[] {
+       "com.lectureguard.lecture_guard"
+   });
+   // Optional: lock down system UI while the task is running (API 28+).
+   dpm.setLockTaskFeatures(adminComponent, DevicePolicyManager.LOCK_TASK_FEATURE_NONE);
+   ```
+
+3. Keep LectureGuard installed for the work profile / managed device user and
+   distribute it through the MDM. `startLockTask()` then enters
+   `LOCK_TASK_MODE_LOCKED`, and the Pass Mode warning banner stays hidden.
+4. Verify on a provisioned device with
+   `adb shell dumpsys activity activities | findstr mLockTaskModeState`: it must
+   report `LOCKED`. `PINNED` means step 2 did not apply.
+5. Keep the exit PIN enabled: kiosk mode blocks Recents and Home, but ending a
+   session still needs an authorised exit path.
+
+### iOS
+
+iOS has no equivalent API. Guided Access has to be started by the device
+operator (triple-click the side or top button) or by an MDM applying supervised
+Single App Mode. Pass Mode cannot enable it programmatically and shows no lock
+warning on iOS.
+
 ## Development and validation
 
 ```powershell

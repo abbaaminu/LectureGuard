@@ -4,15 +4,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/attendance_models.dart';
 import '../providers/lecture_guard_providers.dart';
 import '../services/pass_mode_lock_service.dart';
+import '../services/student_roster.dart';
 import '../services/sync_engine_service.dart';
 import '../widgets/pin_exit_dialog.dart';
 
 class StudentPassModeScreen extends ConsumerStatefulWidget {
   final bool authGateManaged;
 
+  /// Injectable so tests can simulate a platform that refuses to lock the
+  /// device; production always uses the method channel implementation.
+  final PassModeLockService? lockService;
+
   const StudentPassModeScreen({
     super.key,
     this.authGateManaged = false,
+    this.lockService,
   });
 
   @override
@@ -57,6 +63,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
   String _searchQuery = '';
   String? _activeJumpLetter;
   bool _unlockedForExit = false;
+  String? _lockWarning;
   bool _busy = false;
   String? _busyStudentId;
 
@@ -92,15 +99,19 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
         true) {
       return;
     }
-    try {
-      await PassModeLockService().start();
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not enable screen pinning: $error')),
-        );
-      }
-    }
+    final lockService = widget.lockService ?? PassModeLockService();
+    final state = await lockService.start();
+    if (!mounted) return;
+    setState(() {
+      // Persist the warning for as long as the lock is not engaged: the
+      // invigilator needs to keep seeing it, and a snackbar disappears after a
+      // few seconds.
+      _lockWarning = state == PassModeLockState.failed
+          ? 'Pass Mode could not lock this device. The roster stays open, so '
+              'pin LectureGuard manually from Recents (Android) or start Guided '
+              'Access (iOS), or the app can be left without the exit PIN.'
+          : null;
+    });
   }
 
   Future<void> _handleExitAttempt() async {
@@ -240,23 +251,20 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
   }
 
   Map<String, int> _buildLetterIndexMap(List<Student> roster) {
-    final map = <String, int>{};
-    for (int i = 0; i < roster.length; i++) {
-      final letter = roster[i].sortInitial;
-      map.putIfAbsent(letter, () => i);
-    }
-    return map;
+    return buildRosterLetterIndex(roster);
   }
 
   void _jumpToLetter(String letter, Map<String, int> letterIndexMap) {
-    final index = letterIndexMap[letter];
+    final targetLetter = nextAvailableLetter(letter, letterIndexMap);
+    if (targetLetter == null) return;
+    final index = letterIndexMap[targetLetter];
     if (index == null || !_scrollController.hasClients) return;
     final targetOffset = (index * _rowExtent).clamp(
       0.0,
       _scrollController.position.maxScrollExtent,
     );
     _scrollController.jumpTo(targetOffset);
-    setState(() => _activeJumpLetter = letter);
+    setState(() => _activeJumpLetter = targetLetter);
   }
 
   String _networkLabel(NetworkTransport transport) {
@@ -277,14 +285,14 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
     final sessionState = ref.watch(lectureSessionProvider);
     final lecture = sessionState.activeLecture;
 
-    // Instant Search Filter activates dynamically at 2+ characters
-    final trimmed = _searchQuery.trim().toLowerCase();
-    final isFiltering = trimmed.length >= 2;
+    final trimmed = normalizeRosterSearch(_searchQuery);
+    final isFiltering = trimmed.isNotEmpty;
     final visibleRoster = isFiltering
         ? sessionState.roster.where((student) {
-            return student.displayName.toLowerCase().contains(trimmed) ||
-                student.fullName.toLowerCase().contains(trimmed) ||
-                student.studentCode.toLowerCase().contains(trimmed);
+            return normalizeRosterSearch(student.displayName)
+                    .contains(trimmed) ||
+                normalizeRosterSearch(student.fullName).contains(trimmed) ||
+                normalizeRosterSearch(student.studentCode).contains(trimmed);
           }).toList()
         : sessionState.roster;
 
@@ -328,7 +336,37 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
         ),
         body: Column(
           children: [
-            // Instant 2+ Character Search Bar
+            // Persistent, not a snackbar: the banner disappears only when a
+            // later attempt actually locks the device.
+            if (_lockWarning != null)
+              Container(
+                key: const Key('pass-mode-lock-warning'),
+                width: double.infinity,
+                color: const Color(0xFFFEF3C7),
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFF92400E),
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _lockWarning!,
+                        style: const TextStyle(
+                          color: Color(0xFF92400E),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            // Instant one-character search.
             Container(
               color: Colors.white,
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -346,7 +384,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                         )
                       : null,
                   hintText:
-                      'Type 2+ characters to filter (${sessionState.enrolledCount} enrolled)...',
+                      'Search students (${sessionState.enrolledCount} enrolled)...',
                   isDense: true,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(10),
@@ -354,7 +392,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                 ),
                 onChanged: (val) => setState(() {
                   _searchQuery = val;
-                  if (val.trim().length >= 2) _activeJumpLetter = null;
+                  if (val.trim().isNotEmpty) _activeJumpLetter = null;
                 }),
               ),
             ),
@@ -372,6 +410,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                             ),
                           )
                         : ListView.builder(
+                            key: const Key('pass-mode-roster-list'),
                             controller: _scrollController,
                             itemExtent: _rowExtent,
                             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -383,16 +422,18 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                               final isLocked = record?.isLocked ?? false;
                               final isLate =
                                   record?.status == AttendanceStatus.late;
+                              final isPresent =
+                                  record?.status == AttendanceStatus.present;
 
                               return Padding(
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 14, vertical: 4),
                                 child: Material(
-                                  color: isLocked
-                                      ? (isLate
-                                          ? const Color(0xFFDCFCE7)
-                                          : const Color(0xFF16A34A))
-                                      : Colors.white,
+                                  color: isPresent
+                                      ? const Color(0xFF16A34A)
+                                      : isLate
+                                          ? const Color(0xFFFFE6A6)
+                                          : Colors.white,
                                   borderRadius: BorderRadius.circular(12),
                                   child: InkWell(
                                     onTap: isLocked || _busy
@@ -406,7 +447,9 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                                         borderRadius: BorderRadius.circular(12),
                                         border: Border.all(
                                           color: isLocked
-                                              ? const Color(0xFF15803D)
+                                              ? (isLate
+                                                  ? const Color(0xFFD97706)
+                                                  : const Color(0xFF15803D))
                                               : const Color(0xFFE2E8F0),
                                         ),
                                       ),
@@ -427,7 +470,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                                                   : Icons.fingerprint,
                                               color: isLocked
                                                   ? (isLate
-                                                      ? const Color(0xFF15803D)
+                                                      ? const Color(0xFF92400E)
                                                       : Colors.white)
                                                   : const Color(0xFF0F172A),
                                             ),
@@ -447,7 +490,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                                                   style: TextStyle(
                                                     fontWeight: FontWeight.w700,
                                                     fontSize: 14,
-                                                    color: isLocked && !isLate
+                                                    color: isPresent
                                                         ? Colors.white
                                                         : const Color(
                                                             0xFF0F172A),
@@ -458,13 +501,17 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                                                       ? (isLate
                                                           ? 'Checked In · Late'
                                                           : 'Locked · Present')
-                                                      : '${student.studentCode} · Gr ${student.gradeLevel}',
+                                                      : isLate
+                                                          ? 'Checked In · Late'
+                                                          : isPresent
+                                                              ? 'Checked In · Present'
+                                                              : '${student.studentCode} · Gr ${student.gradeLevel}',
                                                   maxLines: 1,
                                                   overflow:
                                                       TextOverflow.ellipsis,
                                                   style: TextStyle(
                                                     fontSize: 12,
-                                                    color: isLocked && !isLate
+                                                    color: isPresent
                                                         ? const Color(
                                                             0xFFDCFCE7)
                                                         : const Color(
@@ -479,7 +526,7 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                                               Icons.lock,
                                               size: 16,
                                               color: isLate
-                                                  ? const Color(0xFF15803D)
+                                                  ? const Color(0xFF92400E)
                                                   : Colors.white,
                                             ),
                                         ],
