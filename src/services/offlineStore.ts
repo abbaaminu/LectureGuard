@@ -33,14 +33,14 @@ export function loadPersistedState(): PersistedSnapshot {
     return {
       session: rawSession ? (JSON.parse(rawSession) as AttendanceSession) : null,
       records: rawRecords ? (JSON.parse(rawRecords) as Record<string, AttendanceRecord>) : {},
-      lecturerPin: rawPin && /^\d{4}$/.test(rawPin) ? rawPin : '2468',
+      lecturerPin: rawPin && /^\d{4}$/.test(rawPin) ? rawPin : '',
       networkTransport,
     };
   } catch {
     return {
       session: null,
       records: {},
-      lecturerPin: '2468',
+      lecturerPin: '',
       networkTransport: 'mobile',
     };
   }

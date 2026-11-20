@@ -99,7 +99,7 @@ export const PinExitDialog: React.FC<PinExitDialogProps> = ({
                 Lecturer PIN Required
               </h2>
               <p className="text-xs text-slate-500">
-                PopScope Exit Guard · Default PIN: <span className="font-mono font-semibold text-slate-700">2468</span>
+                Enter the lecturer PIN configured in Teacher Monitor.
               </p>
             </div>
           </div>
