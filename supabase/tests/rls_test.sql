@@ -44,6 +44,7 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
 
 \ir ../migrations/001_lectureguard_schema.sql
 \ir ../migrations/002_fix_rls_and_views.sql
+\ir ../migrations/003_school_settings_and_analytics.sql
 
 DO $$
 BEGIN
@@ -114,7 +115,14 @@ INSERT INTO public.attendance_records (session_id, lecture_id, student_id, statu
 SELECT ats.id, ats.lecture_id, '10000000-0000-0000-0000-000000000001', 'present'
 FROM public.attendance_sessions AS ats
 WHERE ats.lecture_id = '20000000-0000-0000-0000-000000000001'
-  AND ats.session_date <= DATE '2026-10-03';
+  AND ats.session_date <= DATE '2026-10-02';
+INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
+VALUES (
+  '30000000-0000-0000-0000-000000000004',
+  '20000000-0000-0000-0000-000000000001',
+  '10000000-0000-0000-0000-000000000001',
+  'excused'
+);
 INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
 VALUES (
   '30000000-0000-0000-0000-000000000006',
@@ -144,7 +152,14 @@ $$;
 DO $$
 BEGIN
   IF has_table_privilege('anon', 'public.v_student_attendance_summary', 'SELECT')
-     OR has_table_privilege('anon', 'public.v_teacher_submission_logs', 'SELECT') THEN
+     OR has_table_privilege('anon', 'public.v_teacher_submission_logs', 'SELECT')
+     OR has_table_privilege('anon', 'public.v_student_weekly_attendance', 'SELECT')
+     OR has_table_privilege('anon', 'public.school_settings', 'SELECT')
+     OR has_function_privilege(
+       'anon',
+       'public.admin_chronic_absentee_page(text,smallint,date,date)',
+       'EXECUTE'
+     ) THEN
     RAISE EXCEPTION 'anon unexpectedly has view SELECT privilege';
   END IF;
 END;
@@ -176,19 +191,42 @@ $$;
 RESET ROLE;
 
 -- Student 1 sees only their own rows; missing attendance records count as absent.
+-- Fixture recap (see the inserts above): sessions 1-5 belong to lecture BIO-1,
+-- and student 1 has exactly THREE records there: 'present' on 2026-10-01,
+-- 'present' on 2026-10-02 and 'excused' on 2026-10-04. Sessions 3 and 5 have no
+-- record at all, which is what the implicit-absence assertions below rely on.
+-- The fourth fixture record belongs to student 2 in another lecture, so it must
+-- never be visible here.
 SET ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000004', true);
 DO $$
 DECLARE
   summary record;
+  own_records integer;
 BEGIN
+  SELECT count(*) INTO own_records FROM public.attendance_records;
   IF (SELECT count(*) FROM public.students) <> 1
      OR (SELECT count(*) FROM public.lectures) <> 1
      OR (SELECT count(*) FROM public.enrollments) <> 1
      OR (SELECT count(*) FROM public.attendance_sessions) <> 5
-     OR (SELECT count(*) FROM public.attendance_records) <> 3
+     OR own_records <> 3
+     OR (SELECT count(*) FROM public.school_settings) <> 1
      OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 5 THEN
-    RAISE EXCEPTION 'student can see rows outside their enrolled class';
+    RAISE EXCEPTION
+      'student can see rows outside their enrolled class (records=%)',
+      own_records;
+  END IF;
+  -- Regression guard for the fixture defect that used to make this file abort:
+  -- student 2 has exactly one attendance record and it must stay invisible.
+  IF EXISTS (
+    SELECT 1 FROM public.attendance_records
+    WHERE student_id = '10000000-0000-0000-0000-000000000002'
+  ) THEN
+    RAISE EXCEPTION 'student can read another student attendance record';
+  END IF;
+  IF (SELECT excused_counts_as_attended
+      FROM public.school_settings WHERE id = 1) THEN
+    RAISE EXCEPTION 'school setting did not default to not counting excused';
   END IF;
 
   SELECT * INTO summary
@@ -198,9 +236,9 @@ BEGIN
     RAISE EXCEPTION 'student summary row is missing';
   END IF;
   IF summary.total_sessions <> 5
-     OR summary.attended_sessions <> 3
+     OR summary.attended_sessions <> 2
      OR summary.unexcused_absences <> 2
-     OR summary.attendance_percentage <> 60.0
+     OR summary.attendance_percentage <> 40.0
      OR NOT summary.chronic_absenteeism_flag THEN
     RAISE EXCEPTION 'missing records were not counted as absences: %', row_to_json(summary);
   END IF;
@@ -219,19 +257,36 @@ RESET ROLE;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000002', true);
 SET ROLE authenticated;
 DO $$
+DECLARE
+  updated_count integer;
+  own_records integer;
 BEGIN
+  SELECT count(*) INTO own_records FROM public.attendance_records;
   IF (SELECT count(*) FROM public.students) <> 1
      OR (SELECT count(*) FROM public.lectures) <> 1
      OR (SELECT count(*) FROM public.enrollments) <> 1
      OR (SELECT count(*) FROM public.attendance_sessions) <> 5
-     OR (SELECT count(*) FROM public.attendance_records) <> 3
+     OR own_records <> 3
      OR (SELECT count(*) FROM public.v_teacher_submission_logs) <> 5 THEN
-    RAISE EXCEPTION 'teacher can see rows outside their assigned class';
+    RAISE EXCEPTION
+      'teacher can see rows outside their assigned class (records=%)',
+      own_records;
   END IF;
 
+  UPDATE public.school_settings
+  SET excused_counts_as_attended = TRUE
+  WHERE id = 1;
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+  IF updated_count <> 0 THEN
+    RAISE EXCEPTION 'teacher changed a school-wide admin setting';
+  END IF;
+
+  -- A teacher may record attendance for their own session. Session 3 has no
+  -- record for this student yet, so this is an insert (session 4 already holds
+  -- the 'excused' fixture row and is protected by a unique constraint).
   INSERT INTO public.attendance_records (session_id, lecture_id, student_id, status)
   VALUES (
-    '30000000-0000-0000-0000-000000000004',
+    '30000000-0000-0000-0000-000000000003',
     '20000000-0000-0000-0000-000000000001',
     '10000000-0000-0000-0000-000000000001',
     'late'
@@ -260,6 +315,21 @@ BEGIN
     RAISE EXCEPTION 'teacher wrote a record for a student not enrolled in their class';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
+
+  BEGIN
+    INSERT INTO public.attendance_records (
+      session_id, lecture_id, student_id, status, override_by
+    )
+    VALUES (
+      '30000000-0000-0000-0000-000000000005',
+      '20000000-0000-0000-0000-000000000001',
+      '10000000-0000-0000-0000-000000000001',
+      'present',
+      '00000000-0000-0000-0000-000000000001'
+    );
+    RAISE EXCEPTION 'teacher attributed an override to another profile';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
 END;
 $$;
 RESET ROLE;
@@ -268,6 +338,9 @@ RESET ROLE;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000001', true);
 SET ROLE authenticated;
 DO $$
+DECLARE
+  summary record;
+  updated_count integer;
 BEGIN
   IF (SELECT count(*) FROM public.students) <> 2
      OR (SELECT count(*) FROM public.lectures) <> 2
@@ -289,6 +362,39 @@ BEGIN
   IF (SELECT full_name FROM public.profiles
       WHERE id = '00000000-0000-0000-0000-000000000006') <> 'New Student Updated' THEN
     RAISE EXCEPTION 'admin profile insert/update policy failed';
+  END IF;
+
+  UPDATE public.school_settings
+  SET excused_counts_as_attended = TRUE,
+      updated_by = auth.uid()
+  WHERE id = 1;
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+  IF updated_count <> 1 THEN
+    RAISE EXCEPTION 'admin could not update school-wide attendance settings';
+  END IF;
+
+  SELECT * INTO summary
+  FROM public.v_student_attendance_summary
+  WHERE student_id = '10000000-0000-0000-0000-000000000001';
+  IF summary.attended_sessions <> 4
+     OR summary.attendance_percentage <> 80.0
+     OR summary.chronic_absenteeism_flag THEN
+    RAISE EXCEPTION 'excused attendance setting did not update summary: %',
+      row_to_json(summary);
+  END IF;
+
+  IF (SELECT count(*) FROM public.v_student_weekly_attendance) = 0 THEN
+    RAISE EXCEPTION 'weekly attendance view returned no rows';
+  END IF;
+
+  UPDATE public.school_settings
+  SET excused_counts_as_attended = FALSE,
+      updated_by = auth.uid()
+  WHERE id = 1;
+  IF (SELECT count(*) FROM public.admin_chronic_absentee_page(
+        'STU-1', 13::smallint, DATE '2026-10-01', DATE '2026-10-05'
+      )) <> 1 THEN
+    RAISE EXCEPTION 'filtered chronic-absence page returned the wrong result';
   END IF;
 END;
 $$;
