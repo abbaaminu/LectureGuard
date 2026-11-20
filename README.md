@@ -57,6 +57,27 @@ On iPhone and iPad, Guided Access must be enabled and started by the device
 operator, or a school MDM must apply supervised Single App Mode. Pass Mode
 cannot enable Guided Access programmatically.
 
+## Student identity options
+
+Pass Mode records attendance against a student row, but the app has to be told
+*which* student is standing at the tablet. The table lists the options that are
+realistically available to a school; only teacher attestation is implemented
+today.
+
+| Option | How it would work | What it proves | Status in LectureGuard |
+| --- | --- | --- | --- |
+| Per-student QR / NFC card | The student presents their own card; the camera (QR) or NFC reader resolves the card token to a student id. | Possession of the card. | Not implemented. No scanner or NFC dependency is shipped. |
+| Student-entered PIN bound to the student id | After the roster tap, the student types a short PIN that is bound to their student id (`students.id`). | Knowledge of a secret tied to one student. | Not implemented. The PIN in the app is the lecturer/admin exit and override PIN (`PinSecurityService`), never a student credential. |
+| One device per student (BYOD) | Each student signs in on their own phone and checks themselves in; the session is scoped to their account. | Account possession. | Not implemented. Pass Mode is a shared invigilator tablet; only staff accounts sign in. |
+| Teacher attestation | The invigilator taps the student on the roster and confirms the check-in. | The invigilator's judgement, recorded as `override_by` + `override_reason`. | **Implemented.** The tap is gated by the device biometric; when biometrics are unavailable the lecturer PIN authorises an override and the reason is stored on the record. |
+| Per-student face enrolment | Each student's face is enrolled once, then matched at check-in. | Biometric identity of that student. | Not implemented. `local_auth` only verifies a fingerprint/Face ID enrolled on the shared device, which the limitation above explains is not student identity. |
+
+**Implemented today: teacher attestation.** A roster tap plus device biometric (or
+lecturer-PIN override with a stored reason) is an invigilator-attested check-in,
+not a proof of student identity. The other four options need a new credential
+store (card tokens, per-student PIN hashes, or face templates) and are out of
+scope for the current schema.
+
 ## Pass Mode device lockdown
 
 Pass Mode is not a kiosk out of the box. On Android the app calls
