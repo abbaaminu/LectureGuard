@@ -27,7 +27,7 @@ void backgroundSyncDispatcher() {
 
     WidgetsFlutterBinding.ensureInitialized();
     const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
-    const supabaseKey = String.fromEnvironment('SUPABASE_PUBLISHABLE_KEY');
+    const supabaseKey = String.fromEnvironment('SUPABASE_ANON_KEY');
     if (supabaseUrl.isEmpty || supabaseKey.isEmpty) {
       throw StateError('Supabase is not configured for background sync.');
     }

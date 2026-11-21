@@ -6,13 +6,41 @@ import 'screens/lecturer_pin_setup_screen.dart';
 import 'services/background_sync_service.dart';
 import 'widgets/auth_gate.dart';
 
+/// Returns null when the dart-define configuration is usable, otherwise a
+/// human-readable description of the first problem found.
+///
+/// The URL check is deliberately strict: Supabase clients send the anon key as
+/// a header on every request, so a plain-HTTP or relative URL would leak it (or
+/// silently talk to the wrong host).
+String? validateSupabaseConfiguration({
+  required String url,
+  required String anonKey,
+}) {
+  if (url.isEmpty || anonKey.isEmpty) {
+    return 'Copy env.example.json to env.json, fill in your Supabase project URL '
+        'and anon/publishable key, then run flutter run '
+        '--dart-define-from-file=env.json.';
+  }
+  final uri = Uri.tryParse(url);
+  if (uri == null || !uri.isScheme('https') || uri.host.isEmpty) {
+    return 'SUPABASE_URL must be an absolute https URL such as '
+        'https://<project-ref>.supabase.co; "$url" was rejected so the anon key '
+        'is never sent over an insecure connection.';
+  }
+  return null;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
-  const supabaseKey = String.fromEnvironment('SUPABASE_PUBLISHABLE_KEY');
-  if (supabaseUrl.isEmpty || supabaseKey.isEmpty) {
-    runApp(const _ConfigurationRequiredApp());
+  const supabaseKey = String.fromEnvironment('SUPABASE_ANON_KEY');
+  final configurationProblem = validateSupabaseConfiguration(
+    url: supabaseUrl,
+    anonKey: supabaseKey,
+  );
+  if (configurationProblem != null) {
+    runApp(_ConfigurationRequiredApp(problem: configurationProblem));
     return;
   }
 
@@ -90,7 +118,9 @@ class _LectureGuardAppState extends ConsumerState<LectureGuardApp> {
 }
 
 class _ConfigurationRequiredApp extends StatelessWidget {
-  const _ConfigurationRequiredApp();
+  final String problem;
+
+  const _ConfigurationRequiredApp({required this.problem});
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -99,25 +129,21 @@ class _ConfigurationRequiredApp extends StatelessWidget {
           body: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 560),
-              child: const Padding(
-                padding: EdgeInsets.all(24),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    const Text(
                       'Supabase configuration required',
                       style: TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    SizedBox(height: 12),
-                    Text(
-                      'Run with --dart-define=SUPABASE_URL=... and '
-                      '--dart-define=SUPABASE_PUBLISHABLE_KEY=... using your '
-                      'Supabase project values.',
-                    ),
+                    const SizedBox(height: 12),
+                    Text(problem),
                   ],
                 ),
               ),

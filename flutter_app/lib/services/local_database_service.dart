@@ -1,11 +1,12 @@
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 import '../models/attendance_models.dart';
+import 'student_roster.dart';
 import 'session_ids.dart';
 
 class LocalDatabaseService {
   static const _dbName = 'lecture_guard_v1.db';
-  static const _dbVersion = 3;
+  static const _dbVersion = 4;
 
   final DatabaseFactory _databaseFactory;
   final String? _databasePath;
@@ -99,6 +100,7 @@ class LocalDatabaseService {
             biometric_verified INTEGER NOT NULL DEFAULT 0,
             biometric_method TEXT,
             override_reason TEXT,
+            override_by TEXT,
             sync_status TEXT NOT NULL DEFAULT 'pending',
             device_recorded_at TEXT NOT NULL,
             row_version INTEGER NOT NULL DEFAULT 1,
@@ -108,6 +110,17 @@ class LocalDatabaseService {
             UNIQUE(session_id, student_id)
           );
           ''');
+
+          await db.execute('''
+          CREATE TABLE school_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            excused_counts_as_attended INTEGER NOT NULL DEFAULT 0
+          );
+          ''');
+          await db.insert('school_settings', {
+            'id': 1,
+            'excused_counts_as_attended': 0,
+          });
 
           await db.execute(
             'CREATE INDEX idx_students_alpha ON students(last_name COLLATE NOCASE, first_name COLLATE NOCASE);',
@@ -158,6 +171,21 @@ class LocalDatabaseService {
             );
             await db.execute(
               'ALTER TABLE attendance_records ADD COLUMN next_retry_at TEXT;',
+            );
+          }
+          if (oldVersion < 4) {
+            await db.execute(
+              'ALTER TABLE attendance_records ADD COLUMN override_by TEXT;',
+            );
+            await db.execute('''
+              CREATE TABLE school_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                excused_counts_as_attended INTEGER NOT NULL DEFAULT 0
+              )
+            ''');
+            await db.insert(
+              'school_settings',
+              {'id': 1, 'excused_counts_as_attended': 0},
             );
           }
         },
@@ -244,9 +272,61 @@ class LocalDatabaseService {
       SELECT s.* FROM students s
       INNER JOIN enrollments e ON e.student_id = s.id
       WHERE e.lecture_id = ?
-      ORDER BY s.last_name COLLATE NOCASE ASC, s.first_name COLLATE NOCASE ASC
     ''', [lectureId]);
-    return rows.map(Student.fromMap).toList();
+    return sortStudents(rows.map(Student.fromMap).toList());
+  }
+
+  Future<SchoolSettings> getSchoolSettings() async {
+    final db = await database;
+    final rows = await db.query(
+      'school_settings',
+      where: 'id = 1',
+      limit: 1,
+    );
+    if (rows.isEmpty) return const SchoolSettings();
+    return SchoolSettings.fromMap(rows.first);
+  }
+
+  Future<void> cacheSchoolSettings(SchoolSettings settings) async {
+    final db = await database;
+    await db.insert(
+      'school_settings',
+      settings.toSqliteMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<Map<String, Object?>>> getLectureHistory(String lectureId) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT
+        s.id,
+        s.session_date,
+        s.started_at,
+        s.ended_at,
+        s.enrolled_count,
+        COUNT(r.id) AS recorded_count,
+        SUM(CASE WHEN r.status IN ('present', 'late') THEN 1 ELSE 0 END)
+          AS checked_in_count,
+        SUM(CASE WHEN r.status = 'absent' THEN 1 ELSE 0 END) AS absent_count
+      FROM attendance_sessions AS s
+      LEFT JOIN attendance_records AS r ON r.session_id = s.id
+      WHERE s.lecture_id = ? AND s.ended_at IS NOT NULL
+      GROUP BY s.id
+      ORDER BY s.session_date DESC, s.started_at DESC
+    ''', [lectureId]);
+  }
+
+  Future<List<Map<String, Object?>>> getSessionHistoryRecords(
+      String sessionId) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT r.*, s.first_name, s.last_name, s.student_code
+      FROM attendance_records AS r
+      LEFT JOIN students AS s ON s.id = r.student_id
+      WHERE r.session_id = ?
+      ORDER BY s.last_name COLLATE NOCASE, s.first_name COLLATE NOCASE
+    ''', [sessionId]);
   }
 
   Future<void> upsertSession(AttendanceSession session) async {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
@@ -44,6 +46,8 @@ class SessionState {
   final bool isRestoring;
   final NetworkTransport networkTransport;
   final SyncProgress? syncProgress;
+  final bool excusedCountsAsAttended;
+  final String? schoolSettingsError;
 
   const SessionState({
     this.activeLecture,
@@ -56,6 +60,8 @@ class SessionState {
     this.isRestoring = false,
     this.networkTransport = NetworkTransport.offline,
     this.syncProgress,
+    this.excusedCountsAsAttended = false,
+    this.schoolSettingsError,
   });
 
   int get enrolledCount => roster.length;
@@ -64,10 +70,14 @@ class SessionState {
           r.status == AttendanceStatus.present ||
           r.status == AttendanceStatus.late)
       .length;
-  int get absentCount => roster.where((student) {
-        final record = recordsByStudentId[student.id];
-        return record == null || record.status == AttendanceStatus.absent;
-      }).length;
+  int get absentCount {
+    final attended = recordsByStudentId.values.where((record) =>
+        record.status == AttendanceStatus.present ||
+        record.status == AttendanceStatus.late ||
+        (excusedCountsAsAttended &&
+            record.status == AttendanceStatus.excused));
+    return (enrolledCount - attended.length).clamp(0, enrolledCount);
+  }
 
   SessionState copyWith({
     Lecture? activeLecture,
@@ -80,7 +90,10 @@ class SessionState {
     bool? isRestoring,
     NetworkTransport? networkTransport,
     SyncProgress? syncProgress,
+    bool? excusedCountsAsAttended,
+    String? schoolSettingsError,
     bool clearSyncProgress = false,
+    bool clearSchoolSettingsError = false,
     bool clearActiveLecture = false,
     bool clearActiveSession = false,
     bool clearRoster = false,
@@ -102,6 +115,11 @@ class SessionState {
         networkTransport: networkTransport ?? this.networkTransport,
         syncProgress:
             clearSyncProgress ? null : (syncProgress ?? this.syncProgress),
+        excusedCountsAsAttended:
+            excusedCountsAsAttended ?? this.excusedCountsAsAttended,
+        schoolSettingsError: clearSchoolSettingsError
+            ? null
+            : (schoolSettingsError ?? this.schoolSettingsError),
       );
 }
 
@@ -131,9 +149,11 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   Future<void> _initialize() async {
     final initialTransport = await _syncEngine.currentTransport();
     final pendingCount = await _db.getPendingSyncCount();
+    final settings = await _db.getSchoolSettings();
     _setState((current) => current.copyWith(
           networkTransport: initialTransport,
           pendingSyncCount: pendingCount,
+          excusedCountsAsAttended: settings.excusedCountsAsAttended,
         ));
     if (_disposed) return;
 
@@ -142,6 +162,13 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
         _setState((current) => current.copyWith(
               networkTransport: transport,
             ));
+        if (transport != NetworkTransport.offline) {
+          unawaited(refreshSchoolSettings().catchError((Object error) {
+            _setState((current) => current.copyWith(
+                  schoolSettingsError: error.toString(),
+                ));
+          }));
+        }
       },
       onBatchProgress: (progress) {
         _setState((current) => current.copyWith(
@@ -160,6 +187,62 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
             ));
       },
     );
+    if (initialTransport != NetworkTransport.offline) {
+      try {
+        await refreshSchoolSettings();
+      } catch (error) {
+        _setState((current) => current.copyWith(
+              schoolSettingsError: error.toString(),
+            ));
+      }
+    }
+  }
+
+  Future<void> refreshSchoolSettings() async {
+    final row = await Supabase.instance.client
+        .from('school_settings')
+        .select('excused_counts_as_attended')
+        .eq('id', 1)
+        .maybeSingle();
+    if (row == null) {
+      throw StateError('The school-wide attendance setting is missing.');
+    }
+    final settings = SchoolSettings.fromMap(row);
+    await _db.cacheSchoolSettings(settings);
+    _setState((current) => current.copyWith(
+          excusedCountsAsAttended: settings.excusedCountsAsAttended,
+          clearSchoolSettingsError: true,
+        ));
+  }
+
+  Future<void> updateExcusedCountsAsAttended(bool value) async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) {
+      throw StateError('Sign in before changing school settings.');
+    }
+    try {
+      final row = await Supabase.instance.client
+          .from('school_settings')
+          .update({
+            'excused_counts_as_attended': value,
+            'updated_by': userId,
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', 1)
+          .select('excused_counts_as_attended')
+          .single();
+      final settings = SchoolSettings.fromMap(row);
+      await _db.cacheSchoolSettings(settings);
+      _setState((current) => current.copyWith(
+            excusedCountsAsAttended: settings.excusedCountsAsAttended,
+            clearSchoolSettingsError: true,
+          ));
+    } catch (error) {
+      _setState((current) => current.copyWith(
+            schoolSettingsError: error.toString(),
+          ));
+      rethrow;
+    }
   }
 
   Future<void> loadTeacherLectures() async {
@@ -292,6 +375,8 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
           },
           pendingSyncCount: pendingCount,
           networkTransport: transport,
+          excusedCountsAsAttended: current.excusedCountsAsAttended,
+          schoolSettingsError: current.schoolSettingsError,
         ));
   }
 
@@ -405,9 +490,24 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   }) async {
     final session = state.activeSession;
     final lecture = state.activeLecture;
-    if (session == null || lecture == null) return;
+    if (session == null || lecture == null || session.endedAt != null) {
+      throw StateError('There is no active attendance session.');
+    }
 
     final existing = state.recordsByStudentId[student.id];
+    final requiresReason = status == AttendanceStatus.excused ||
+        status == AttendanceStatus.absent ||
+        existing?.biometricVerified == true;
+    final normalizedReason = reason?.trim();
+    if (requiresReason && (normalizedReason == null || normalizedReason.isEmpty)) {
+      throw ArgumentError(
+        'A reason is required for excused, absent, or biometric overrides.',
+      );
+    }
+    final overrideBy = Supabase.instance.client.auth.currentUser?.id;
+    if (overrideBy == null) {
+      throw StateError('Sign in before recording a teacher override.');
+    }
     final now = DateTime.now();
 
     final record = AttendanceRecord(
@@ -423,7 +523,8 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
               : null,
       biometricVerified: existing?.biometricVerified ?? false,
       biometricMethod: 'manual_override',
-      overrideReason: reason,
+      overrideReason: normalizedReason,
+      overrideBy: overrideBy,
       syncStatus: SyncStatus.pending,
       deviceRecordedAt: now,
     );

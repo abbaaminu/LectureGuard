@@ -1,0 +1,176 @@
+﻿Pager usage is off.
+DO
+DO
+BEGIN
+psql.exe : psql:qa/diag_copilot_assertions.sql:12: NOTICE:  schema "auth" does not exist, skipping
+At line:1 char:1
++ & 'C:\Program Files\PostgreSQL\16\bin\psql.exe' -X -h 127.0.0.1 -p 55 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (psql:qa/diag_co...exist, skipping:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+DROP SCHEMA
+CREATE SCHEMA
+CREATE TABLE
+CREATE FUNCTION
+GRANT
+GRANT
+GRANT
+ALTER DEFAULT PRIVILEGES
+ALTER DEFAULT PRIVILEGES
+ALTER DEFAULT PRIVILEGES
+CREATE EXTENSION
+CREATE TYPE
+CREATE TYPE
+CREATE TYPE
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE VIEW
+CREATE VIEW
+CREATE FUNCTION
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE VIEW
+CREATE VIEW
+REVOKE
+GRANT
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+DROP POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE POLICY
+CREATE FUNCTION
+psql:supabase/migrations/002_fix_rls_and_views.sql:281: NOTICE:  trigger "on_auth_user_created" for relation 
+"auth.users" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TABLE
+INSERT 0 1
+ALTER TABLE
+CREATE POLICY
+CREATE POLICY
+GRANT
+REVOKE
+DROP POLICY
+CREATE POLICY
+CREATE VIEW
+CREATE VIEW
+CREATE FUNCTION
+REVOKE
+GRANT
+REVOKE
+GRANT
+INSERT 0 5
+UPDATE 1
+UPDATE 2
+INSERT 0 2
+INSERT 0 2
+INSERT 0 2
+INSERT 0 5
+INSERT 0 1
+INSERT 0 2
+INSERT 0 1
+INSERT 0 1
+--- rows per student as superuser (owner, RLS bypassed) ---
+              student_id              | status  | count 
+--------------------------------------+---------+-------
+ 10000000-0000-0000-0000-000000000001 | present |     2
+ 10000000-0000-0000-0000-000000000001 | excused |     1
+ 10000000-0000-0000-0000-000000000002 | present |     1
+(3 rows)
+
+              set_config              
+--------------------------------------
+ 00000000-0000-0000-0000-000000000004
+(1 row)
+
+SET
+--- what STUDENT 1 actually sees (rls_test.sql lines 200-206 assert 1/1/1/5/4/1/5) ---
+ students_actual | lectures_actual | enrollments_actual | sessions_actual | records_actual | settings_actual | v_logs_actual | v_summary_actual | profiles_actual 
+-----------------+-----------------+--------------------+-----------------+----------------+-----------------+---------------+------------------+-----------------
+               1 |               1 |                  1 |               5 |              3 |               1 |             5 |                1 |               1
+(1 row)
+
+RESET
+--- desired vs actual (rls_test.sql expectations) ---
+           item            | expected 
+---------------------------+----------
+ students                  |        1
+ lectures                  |        1
+ enrollments               |        1
+ sessions                  |        5
+ records                   |        4
+ school_settings           |        1
+ v_teacher_submission_logs |        5
+(7 rows)
+
+ROLLBACK

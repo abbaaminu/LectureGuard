@@ -46,11 +46,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES    TO anon, authen
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon, authenticated;
 
-\echo '=== Applying migrations 001 -> 002 -> 003 -> 004 in order ==='
+\echo '=== Applying migrations 001 -> 002 -> 003 -> 004 -> 005 in order ==='
 \ir ../supabase/migrations/001_lectureguard_schema.sql
 \ir ../supabase/migrations/002_fix_rls_and_views.sql
 \ir ../supabase/migrations/003_school_settings_and_analytics.sql
 \ir ../supabase/migrations/004_harden_teacher_submission_logs.sql
+\ir ../supabase/migrations/005_school_settings_left_join.sql
 
 \echo ''
 \echo '=== CHECK 8a: CHECK constraints on students / lectures (university use) ==='
@@ -350,6 +351,19 @@ SELECT set_config('request.uid', 'aaaaaaaa-0000-0000-0000-000000000002', true);
 SET ROLE authenticated;
 SELECT count(*) AS teacher_rows, min(course_code) AS only_course
 FROM public.teacher_submission_logs(1000, 0);
+RESET ROLE;
+
+\echo ''
+\echo '=== CHECK 9: reporting views survive a missing school_settings row (LOW-04) ==='
+DELETE FROM public.school_settings WHERE id = 1;
+SELECT (SELECT count(*) FROM public.v_student_attendance_summary) AS summary_rows,
+       (SELECT count(*) FROM public.v_student_weekly_attendance)  AS weekly_rows,
+       (SELECT attended_sessions FROM public.v_student_attendance_summary
+         WHERE student_code = 'STU-1')                           AS stu1_attended;
+SELECT set_config('request.uid', 'aaaaaaaa-0000-0000-0000-000000000001', true);
+SET ROLE authenticated;
+SELECT count(*) AS chronic_rows_without_settings
+FROM public.admin_chronic_absentee_page(NULL, NULL, NULL, NULL);
 RESET ROLE;
 
 ROLLBACK;

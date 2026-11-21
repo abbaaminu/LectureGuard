@@ -91,10 +91,24 @@ class _LecturePickerScreenState extends ConsumerState<LecturePickerScreen> {
                     : Column(
                         children: [
                           Expanded(
-                            child: ListView(
-                              children: [
-                                for (final lecture in _lectures)
-                                  ListTile(
+                            child: ListView.builder(
+                              itemCount:
+                                  _lectures.length + (_error == null ? 0 : 1),
+                              itemBuilder: (context, index) {
+                                if (index == _lectures.length) {
+                                  return Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Text(
+                                      'Could not load this roster: $_error',
+                                      style: TextStyle(
+                                        color:
+                                            Theme.of(context).colorScheme.error,
+                                      ),
+                                    ),
+                                  );
+                                }
+                                final lecture = _lectures[index];
+                                return ListTile(
                                     selected:
                                         _selectedLecture?.id == lecture.id,
                                     title: Text(
@@ -110,19 +124,8 @@ class _LecturePickerScreenState extends ConsumerState<LecturePickerScreen> {
                                           : Icons.radio_button_unchecked,
                                     ),
                                     onTap: () => _selectLecture(lecture),
-                                  ),
-                                if (_error != null)
-                                  Padding(
-                                    padding: const EdgeInsets.all(16),
-                                    child: Text(
-                                      'Could not load this roster: $_error',
-                                      style: TextStyle(
-                                        color:
-                                            Theme.of(context).colorScheme.error,
-                                      ),
-                                    ),
-                                  ),
-                              ],
+                                  );
+                              },
                             ),
                           ),
                           if (_selectedLecture != null)

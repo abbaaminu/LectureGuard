@@ -46,6 +46,7 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
 \ir ../migrations/002_fix_rls_and_views.sql
 \ir ../migrations/003_school_settings_and_analytics.sql
 \ir ../migrations/004_harden_teacher_submission_logs.sql
+\ir ../migrations/005_school_settings_left_join.sql
 
 DO $$
 BEGIN
@@ -428,6 +429,48 @@ BEGIN
 END;
 $$;
 RESET ROLE;
+
+-- Regression (LOW-04): the reporting views and the chronic-absence page must
+-- keep returning rows when the single school_settings row is missing. A CROSS
+-- JOIN used to drop every student in that case.
+SAVEPOINT before_settings_delete;
+DELETE FROM public.school_settings WHERE id = 1;
+DO $$
+DECLARE
+  summary record;
+  weekly_rows integer;
+BEGIN
+  IF (SELECT count(*) FROM public.v_student_attendance_summary) <> 2 THEN
+    RAISE EXCEPTION 'summary view dropped students without a school_settings row';
+  END IF;
+  SELECT * INTO summary
+  FROM public.v_student_attendance_summary
+  WHERE student_id = '10000000-0000-0000-0000-000000000001';
+  IF summary.attended_sessions <> 3
+     OR summary.attendance_percentage <> 60.0 THEN
+    RAISE EXCEPTION 'missing school_settings row changed the default semantics: %',
+      row_to_json(summary);
+  END IF;
+  SELECT count(*) INTO weekly_rows FROM public.v_student_weekly_attendance;
+  IF weekly_rows = 0 THEN
+    RAISE EXCEPTION 'weekly attendance view dropped rows without school_settings';
+  END IF;
+END;
+$$;
+
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000001', true);
+SET ROLE authenticated;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM public.admin_chronic_absentee_page(
+        NULL, NULL, NULL, NULL
+      )) = 0 THEN
+    RAISE EXCEPTION 'chronic-absence page dropped rows without school_settings';
+  END IF;
+END;
+$$;
+RESET ROLE;
+ROLLBACK TO SAVEPOINT before_settings_delete;
 
 ROLLBACK;
 \echo 'rls_test.sql passed'

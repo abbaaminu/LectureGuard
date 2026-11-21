@@ -85,11 +85,12 @@ class _ChangeLecturerPinScreenState extends State<ChangeLecturerPinScreen> {
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
-            child: ListView(
-              shrinkWrap: true,
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(24),
-              children: [
-                TextField(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
                   key: const Key('pin-change-old'),
                   controller: _oldPinController,
                   obscureText: true,
@@ -102,8 +103,8 @@ class _ChangeLecturerPinScreenState extends State<ChangeLecturerPinScreen> {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                const SizedBox(height: 12),
-                TextField(
+                  const SizedBox(height: 12),
+                  TextField(
                   key: const Key('pin-change-new'),
                   controller: _newPinController,
                   obscureText: true,
@@ -116,8 +117,8 @@ class _ChangeLecturerPinScreenState extends State<ChangeLecturerPinScreen> {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                const SizedBox(height: 12),
-                TextField(
+                  const SizedBox(height: 12),
+                  TextField(
                   key: const Key('pin-change-confirm'),
                   controller: _confirmPinController,
                   obscureText: true,
@@ -131,28 +132,29 @@ class _ChangeLecturerPinScreenState extends State<ChangeLecturerPinScreen> {
                   ),
                   onSubmitted: (_) => _changePin(),
                 ),
-                if (_errorText != null) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    _errorText!,
-                    key: const Key('pin-change-error'),
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error),
+                  if (_errorText != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      _errorText!,
+                      key: const Key('pin-change-error'),
+                      style:
+                          TextStyle(color: Theme.of(context).colorScheme.error),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  FilledButton(
+                    key: const Key('pin-change-submit'),
+                    onPressed: _saving ? null : _changePin,
+                    child: _saving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Change PIN'),
                   ),
                 ],
-                const SizedBox(height: 20),
-                FilledButton(
-                  key: const Key('pin-change-submit'),
-                  onPressed: _saving ? null : _changePin,
-                  child: _saving
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Change PIN'),
-                ),
-              ],
+              ),
             ),
           ),
         ),

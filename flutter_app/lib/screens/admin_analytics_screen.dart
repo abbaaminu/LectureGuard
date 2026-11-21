@@ -13,7 +13,10 @@ import '../providers/lecture_guard_providers.dart';
 import '../services/csv_export_service.dart';
 
 class AdminAnalyticsScreen extends ConsumerStatefulWidget {
-  const AdminAnalyticsScreen({super.key});
+  /// Injectable for widget tests; production uses the Supabase singleton.
+  final SupabaseClient? client;
+
+  const AdminAnalyticsScreen({super.key, this.client});
 
   @override
   ConsumerState<AdminAnalyticsScreen> createState() =>
@@ -22,6 +25,8 @@ class AdminAnalyticsScreen extends ConsumerStatefulWidget {
 
 class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
   static const _pageSize = 50;
+
+  SupabaseClient get _client => widget.client ?? Supabase.instance.client;
 
   final _searchController = TextEditingController();
   final _gradeController = TextEditingController();
@@ -95,7 +100,7 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
 
     try {
       final offset = reset ? 0 : _chronicStudents.length;
-      final rows = await Supabase.instance.client
+      final rows = await _client
           .rpc(
             'admin_chronic_absentee_page',
             params: _queryParameters(),
@@ -135,7 +140,7 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
       // The logs view is no longer readable by client roles (migration 004);
       // this SECURITY DEFINER function returns the caller's own sessions for a
       // teacher and every session for an admin.
-      final rows = await Supabase.instance.client.rpc(
+      final rows = await _client.rpc(
         'teacher_submission_logs',
         params: {'p_limit': 50, 'p_offset': offset},
       );
@@ -189,7 +194,7 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
     final params = _queryParameters();
     var offset = 0;
     while (true) {
-      final rows = await Supabase.instance.client
+      final rows = await _client
           .rpc(
             'admin_chronic_absentee_page',
             params: params,

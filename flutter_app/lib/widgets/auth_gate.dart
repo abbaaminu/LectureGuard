@@ -42,7 +42,12 @@ class _AuthGateState extends ConsumerState<AuthGate> {
 
   Future<UserRole?>? _loadRole(Session? session) {
     if (session == null) {
-      ref.read(lectureSessionProvider.notifier).clearActiveSessionState();
+      // Deferred: initState calls this while the tree is building, and Riverpod
+      // forbids modifying a provider during a build.
+      Future.microtask(() {
+        if (!mounted) return;
+        ref.read(lectureSessionProvider.notifier).clearActiveSessionState();
+      });
       return null;
     }
     return _loadRoleAndSession(session.user.id);
@@ -90,14 +95,8 @@ class _AuthGateState extends ConsumerState<AuthGate> {
           );
         }
         final role = snapshot.data;
-        if (role == UserRole.teacher) {
-          if (sessionState.activeSession?.isLockedPassMode == true) {
-            return const StudentPassModeScreen(authGateManaged: true);
-          }
-          return const TeacherMonitorScreen();
-        }
-        if (role == UserRole.admin) return const AdminAnalyticsScreen();
-        if (role == UserRole.student) return const StudentAttendanceScreen();
+        final screen = authGateScreenForRole(role, sessionState);
+        if (screen != null) return screen;
         return _AccessMessage(
           message: role == null
               ? 'Your account does not have a school profile yet.'
@@ -107,6 +106,21 @@ class _AuthGateState extends ConsumerState<AuthGate> {
       },
     );
   }
+}
+
+/// Maps a resolved role to the screen the gate renders, or null when the caller
+/// should show the access message. Extracted so the routing table can be tested
+/// without a live Supabase session.
+Widget? authGateScreenForRole(UserRole? role, SessionState sessionState) {
+  if (role == UserRole.teacher) {
+    if (sessionState.activeSession?.isLockedPassMode == true) {
+      return const StudentPassModeScreen(authGateManaged: true);
+    }
+    return const TeacherMonitorScreen();
+  }
+  if (role == UserRole.admin) return const AdminAnalyticsScreen();
+  if (role == UserRole.student) return const StudentAttendanceScreen();
+  return null;
 }
 
 class _AccessMessage extends StatelessWidget {

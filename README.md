@@ -21,9 +21,11 @@ flutter pub get
 flutter run --dart-define-from-file=env.json
 ```
 
-The app shows a setup error screen if either Supabase value is missing. For
-Android, the project targets API level 23 or newer. For iOS, configure
-Face ID and background fetch capabilities as appropriate for the deployment.
+The app shows a setup error screen if either Supabase value is missing, or if
+`SUPABASE_URL` is not an absolute `https://` URL (the anon key is sent as a
+header on every request and must never travel over plain HTTP). For Android,
+the project targets API level 23 or newer. For iOS, configure Face ID and
+background fetch capabilities as appropriate for the deployment.
 
 ## Supabase migrations
 
@@ -38,6 +40,10 @@ Apply these SQL files in order using the Supabase CLI or SQL editor:
 4. `supabase/migrations/004_harden_teacher_submission_logs.sql` — makes the
    teacher submission log staff-only; it is read through the
    `teacher_submission_logs()` function instead of the view.
+5. `supabase/migrations/005_school_settings_left_join.sql` — keeps the
+   reporting views and the chronic-absence page working when the single
+   `school_settings` row is missing (excused absences then use the documented
+   default of not counting as attended).
 
 Configure admin and teacher roles through trusted administrative provisioning.
 The client uses only the anon/publishable key; RLS enforces access.

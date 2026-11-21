@@ -4,6 +4,8 @@ import '../models/attendance_models.dart';
 import '../providers/lecture_guard_providers.dart';
 import 'change_lecturer_pin_screen.dart';
 import '../services/sync_engine_service.dart';
+import '../widgets/teacher_override_dialog.dart';
+import 'class_history_screen.dart';
 import 'lecture_picker_screen.dart';
 
 class TeacherMonitorScreen extends ConsumerStatefulWidget {
@@ -133,41 +135,30 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
 
   Future<void> _overrideStatus({
     required Student student,
-    required AttendanceStatus status,
+    required AttendanceRecord? record,
   }) async {
-    final controller = TextEditingController();
-    final reason = await showDialog<String>(
+    final request = await showDialog<TeacherOverrideRequest>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Set ${student.fullName} to ${status.name}'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 240,
-          decoration: const InputDecoration(
-            labelText: 'Reason (optional)',
-            border: OutlineInputBorder(),
-          ),
+      builder: (context) => TeacherOverrideDialog(
+        studentName: student.fullName,
+        initialStatus: record?.status ?? AttendanceStatus.absent,
+        overridingBiometricCheckIn: record?.biometricVerified == true,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
     );
-    controller.dispose();
-    if (reason == null) return;
-    await ref.read(lectureSessionProvider.notifier).teacherOverrideStatus(
-          student: student,
-          status: status,
-          reason: reason.isEmpty ? null : reason,
+    if (request == null) return;
+    try {
+      await ref.read(lectureSessionProvider.notifier).teacherOverrideStatus(
+            student: student,
+            status: request.status,
+            reason: request.reason,
+          );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save attendance override: $error')),
         );
+      }
+    }
   }
 
   String _transportLabel(NetworkTransport transport) {
@@ -279,6 +270,18 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
                         label: const Text('Choose lecture'),
                       ),
                       if (state.activeLecture != null)
+                        OutlinedButton.icon(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => ClassHistoryScreen(
+                                lecture: state.activeLecture!,
+                              ),
+                            ),
+                          ),
+                          icon: const Icon(Icons.history),
+                          label: const Text('Class history (offline)'),
+                        ),
+                      if (state.activeLecture != null)
                         Text(
                           '${state.enrolledCount} students · '
                           'Period ${state.activeLecture!.periodNumber} · '
@@ -369,23 +372,21 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
                     subtitle: Text(
                       '${student.studentCode} · ${record?.biometricVerified == true ? "Biometric Verified" : "Pending / Manual"}',
                     ),
-                    trailing: DropdownButton<AttendanceStatus>(
-                      value: status,
-                      underline: const SizedBox.shrink(),
-                      items: AttendanceStatus.values
-                          .map((s) => DropdownMenuItem(
-                                value: s,
-                                child: Text(s.name.toUpperCase()),
-                              ))
-                          .toList(),
-                      onChanged: hasActiveSession
-                          ? (newStatus) {
-                              if (newStatus != null) {
-                                _overrideStatus(
-                                    student: student, status: newStatus);
-                              }
-                            }
-                          : null,
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(status.name.toUpperCase()),
+                        IconButton(
+                          onPressed: hasActiveSession
+                              ? () => _overrideStatus(
+                                    student: student,
+                                    record: record,
+                                  )
+                              : null,
+                          icon: const Icon(Icons.edit_outlined),
+                          tooltip: 'Override ${student.fullName} attendance',
+                        ),
+                      ],
                     ),
                   ),
                 );

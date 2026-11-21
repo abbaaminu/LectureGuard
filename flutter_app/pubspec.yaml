@@ -24,6 +24,9 @@ dependencies:
   printing: ^5.13.4
   workmanager: ^0.7.0
   cryptography: ^2.9.0
+  fl_chart: 0.70.2
+  share_plus: 10.1.4
+  diacritic: ^0.1.6
 
 dev_dependencies:
   flutter_test:
@@ -34,3 +37,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/fonts/Roboto-Regular.ttf
+    - assets/fonts/Roboto-Bold.ttf

@@ -84,23 +84,29 @@ class _StudentAttendanceScreenState
                   )
                 : RefreshIndicator(
                     onRefresh: _loadAttendance,
-                    child: ListView(
+                    child: ListView.builder(
                       padding: const EdgeInsets.all(16),
-                      children: [
-                        _AttendanceSummary(summary: _summary),
-                        const SizedBox(height: 20),
-                        Text(
-                          'Attendance records',
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                        const SizedBox(height: 8),
-                        if (_records.isEmpty)
-                          const ListTile(
+                      itemCount: _records.isEmpty ? 3 : _records.length + 2,
+                      itemBuilder: (context, index) {
+                        if (index == 0) {
+                          return _AttendanceSummary(summary: _summary);
+                        }
+                        if (index == 1) {
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            child: Text(
+                              'Attendance records',
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                          );
+                        }
+                        if (_records.isEmpty) {
+                          return const ListTile(
                             title: Text('No attendance records yet.'),
-                          )
-                        else
-                          ..._records.map(_recordTile),
-                      ],
+                          );
+                        }
+                        return _recordTile(_records[index - 2]);
+                      },
                     ),
                   ),
       );

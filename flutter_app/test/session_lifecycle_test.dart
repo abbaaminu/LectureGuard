@@ -39,13 +39,14 @@ void main() {
     gradeLevel: 10,
     homeroom: '10A',
   );
-  final startedAt = DateTime(2026, 11, 19, 9);
+  final startedAt = DateTime.now();
+  final sessionDate = localSessionDate(startedAt);
   final session = AttendanceSession(
-    id: deterministicSessionId(lecture.id, '2026-11-19'),
+    id: deterministicSessionId(lecture.id, sessionDate),
     lectureId: lecture.id,
     teacherId: lecture.teacherId,
     deviceId: 'device-1',
-    sessionDate: '2026-11-19',
+    sessionDate: sessionDate,
     startedAt: startedAt,
     isLockedPassMode: true,
     enrolledCount: 2,
@@ -101,6 +102,33 @@ void main() {
     expect(notifier.state.isRestoring, isFalse);
     notifier.dispose();
     sync.dispose();
+  });
+
+  test('absent count follows the school-wide excused attendance setting', () {
+    final excusedRecord = presentRecord.copyWith(
+      status: AttendanceStatus.excused,
+    );
+    final secondRecord = AttendanceRecord(
+      id: deterministicAttendanceRecordId(session.id, studentTwo.id),
+      sessionId: session.id,
+      lectureId: lecture.id,
+      studentId: studentTwo.id,
+      status: AttendanceStatus.present,
+      deviceRecordedAt: startedAt,
+    );
+    final state = SessionState(
+      roster: [studentOne, studentTwo],
+      recordsByStudentId: {
+        studentOne.id: excusedRecord,
+        studentTwo.id: secondRecord,
+      },
+    );
+
+    expect(state.absentCount, 1);
+    expect(
+      state.copyWith(excusedCountsAsAttended: true).absentCount,
+      0,
+    );
   });
 
   test('ignores late connectivity updates after notifier disposal', () async {
@@ -181,18 +209,60 @@ void main() {
     expect(notifier.state.pendingSyncCount, 2);
     expect(sync.syncCalls, 1);
     expect(result.success, isFalse);
+    final history = await database.getLectureHistory(lecture.id);
+    expect(history, hasLength(1));
+    expect(history.single['recorded_count'], 2);
+    final historyRecords = await database.getSessionHistoryRecords(session.id);
+    expect(historyRecords, hasLength(2));
+    expect(historyRecords.map((record) => record['status']),
+        containsAll(['present', 'absent']));
     notifier.dispose();
     sync.dispose();
+  });
+
+  test('local school setting defaults to false and persists updates', () async {
+    expect(
+        (await database.getSchoolSettings()).excusedCountsAsAttended, isFalse);
+
+    await database.cacheSchoolSettings(
+      const SchoolSettings(excusedCountsAsAttended: true),
+    );
+
+    expect(
+        (await database.getSchoolSettings()).excusedCountsAsAttended, isTrue);
+  });
+
+  test('override actor and reason persist locally and in sync payload',
+      () async {
+    final overridden = AttendanceRecord(
+      id: presentRecord.id,
+      sessionId: session.id,
+      lectureId: lecture.id,
+      studentId: studentOne.id,
+      status: AttendanceStatus.absent,
+      overrideReason: 'Teacher correction',
+      overrideBy: 'teacher-profile',
+      deviceRecordedAt: startedAt,
+    );
+    await database.upsertAttendanceRecord(overridden);
+
+    final persisted = (await database.getSessionRecords(session.id)).single;
+    expect(persisted.overrideBy, 'teacher-profile');
+    expect(persisted.overrideReason, 'Teacher correction');
+    expect(overridden.toSupabasePayload()['override_by'], 'teacher-profile');
   });
 
   test('deterministic IDs remain stable for the same local-day inputs',
       () async {
     expect(
-      deterministicSessionId(lecture.id, '2026-11-19'),
+      deterministicSessionId(lecture.id, session.sessionDate),
       session.id,
     );
     expect(
-      deterministicSessionId(lecture.id, '2026-11-20'),
+      deterministicSessionId(
+        lecture.id,
+        localSessionDate(startedAt.add(const Duration(days: 1))),
+      ),
       isNot(session.id),
     );
     expect(
@@ -213,6 +283,28 @@ void main() {
       (await database.getAlphabeticalRoster(lecture.id))
           .map((student) => student.id),
       [studentOne.id],
+    );
+  });
+
+  test('local database returns a diacritic-insensitive sorted roster',
+      () async {
+    const accentStudent = Student(
+      id: 'student-accent',
+      studentCode: 'STU-ACCENT',
+      firstName: 'Elodie',
+      lastName: 'Éclair',
+      gradeLevel: 10,
+      homeroom: '10A',
+    );
+    await database.cacheLectureRoster(
+      lecture,
+      [studentTwo, studentOne, accentStudent],
+    );
+
+    expect(
+      (await database.getAlphabeticalRoster(lecture.id))
+          .map((student) => student.id),
+      [studentOne.id, accentStudent.id, studentTwo.id],
     );
   });
 
@@ -301,9 +393,16 @@ void main() {
           'attempt_count',
           'last_error',
           'next_retry_at',
+          'override_by',
         ]),
       );
-      expect(sessionRow['session_date'], '2026-11-19');
+      final settingsRow =
+          await upgradedDatabase.query('school_settings', where: 'id = 1');
+      expect(settingsRow.single['excused_counts_as_attended'], 0);
+      expect(
+        sessionRow['session_date'],
+        localSessionDate(DateTime.parse(sessionRow['started_at'] as String)),
+      );
     } finally {
       await migrated.close();
       await directory.delete(recursive: true);

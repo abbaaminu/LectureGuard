@@ -29,6 +29,8 @@ class PinSecurityService {
   static const int _hashIterations = 100000;
   static const int _failuresBeforeLockout = 5;
   static const int _baseLockoutSeconds = 30;
+  static const int _maxLockoutSeconds = 3600;
+  static const int _maxLockoutExponent = 7;
   static const int _hashBits = 256;
   static const _pinHashKey = 'lg_lecturer_pin_hash';
   static const _pinSaltKey = 'lg_lecturer_pin_salt';
@@ -170,7 +172,14 @@ class PinSecurityService {
       await _storage.read(_lockoutLevelKey),
       key: _lockoutLevelKey,
     );
-    final durationSeconds = _baseLockoutSeconds * (1 << lockoutLevel);
+    // Cap the backoff: 30s, 60s, 120s ... up to one hour. Without the cap the
+    // shift keeps growing (and overflows on the web, where ints are doubles).
+    final exponent =
+        lockoutLevel < _maxLockoutExponent ? lockoutLevel : _maxLockoutExponent;
+    final rawSeconds = _baseLockoutSeconds * (1 << exponent);
+    final durationSeconds = rawSeconds < _maxLockoutSeconds
+        ? rawSeconds
+        : _maxLockoutSeconds;
     final lockedUntil = _now()
         .toUtc()
         .add(Duration(seconds: durationSeconds))

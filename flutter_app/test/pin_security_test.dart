@@ -177,6 +177,44 @@ void main() {
     );
   });
 
+  test('PIN lockout backoff stops growing at one hour', () async {
+    final service = pinService();
+    await service.setLecturerPin('5729');
+
+    // Twelve rounds of five failures would be 30s * 2^11 (~17 hours) without a
+    // cap, and the stored level keeps growing from there.
+    for (var round = 0; round < 12; round++) {
+      if (round > 0) {
+        now = now.add(const Duration(hours: 2));
+      }
+      for (var attempt = 0; attempt < 5; attempt++) {
+        await service.verifyLecturerPin('1111');
+      }
+    }
+
+    expect(
+      (await service.getLockoutStatus()).remaining,
+      const Duration(hours: 1),
+    );
+  });
+
+  test('a corrupted lockout level cannot overflow the backoff', () async {
+    final service = pinService();
+    await service.setLecturerPin('5729');
+    for (var attempt = 0; attempt < 5; attempt++) {
+      await service.verifyLecturerPin('1111');
+    }
+    // Level 99 would shift far past the integer width on the web.
+    await store.write('lg_lecturer_pin_lockout_level', '99');
+    now = now.add(const Duration(hours: 2));
+    for (var attempt = 0; attempt < 5; attempt++) {
+      await service.verifyLecturerPin('1111');
+    }
+
+    final remaining = (await service.getLockoutStatus()).remaining;
+    expect(remaining, const Duration(hours: 1));
+  });
+
   testWidgets('Pass Mode blocks route pop and invokes the PIN gate',
       (tester) async {
     var blockedPopAttempts = 0;
@@ -216,6 +254,82 @@ void main() {
       findsOneWidget,
     );
     expect(blockedPopAttempts, 1);
+  });
+
+  testWidgets('the exit dialog locks out after five wrong PINs and unlocks later',
+      (tester) async {
+    final service = pinService();
+    await service.setLecturerPin('5729');
+    bool? verified;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                verified = await showAdminPinExitDialog(
+                  context: context,
+                  pinService: service,
+                );
+              },
+              child: const Text('Exit Pass Mode'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Exit Pass Mode'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    for (var attempt = 0; attempt < 5; attempt++) {
+      await tester.enterText(
+        find.byKey(const Key('lecturer-pin-input')),
+        '1111',
+      );
+      await tester.tap(find.byKey(const Key('lecturer-pin-submit')));
+      await tester.pump();
+      await tester.pump();
+    }
+
+    expect(find.textContaining('Too many attempts'), findsOneWidget);
+    expect(find.byKey(const Key('pin-lockout-countdown')), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('lecturer-pin-submit')))
+          .onPressed,
+      isNull,
+      reason: 'the submit button must stay disabled while locked out',
+    );
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    // Typing the correct PIN during the lockout must not verify anything.
+    await tester.enterText(
+      find.byKey(const Key('lecturer-pin-input')),
+      '5729',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('lecturer-pin-submit')));
+    await tester.pump();
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    now = now.add(const Duration(seconds: 31));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(find.byKey(const Key('pin-lockout-countdown')), findsNothing);
+
+    await tester.enterText(
+      find.byKey(const Key('lecturer-pin-input')),
+      '5729',
+    );
+    await tester.tap(find.byKey(const Key('lecturer-pin-submit')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(verified, isTrue);
   });
 }
 

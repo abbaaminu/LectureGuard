@@ -88,8 +88,9 @@ class _PinExitDialogState extends State<_PinExitDialog> {
         }
       });
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(() => _errorText = 'Could not check PIN lockout: $error');
+      }
     }
   }
 

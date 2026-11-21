@@ -1,3 +1,5 @@
+import 'package:diacritic/diacritic.dart';
+
 enum AttendanceStatus { present, late, absent, excused }
 
 enum SyncStatus { pending, synced, failed }
@@ -23,8 +25,12 @@ class Student {
 
   String get fullName => '$lastName, $firstName';
   String get displayName => '$firstName $lastName';
-  String get sortInitial =>
-      lastName.isNotEmpty ? lastName[0].toUpperCase() : '#';
+  String get sortInitial {
+    final trimmed = lastName.trimLeft();
+    if (trimmed.isEmpty) return '#';
+    final initial = removeDiacritics(trimmed[0]).toUpperCase();
+    return RegExp(r'^[A-Z]$').hasMatch(initial) ? initial : '#';
+  }
 
   factory Student.fromMap(Map<String, dynamic> map) => Student(
         id: map['id'] as String,
@@ -189,6 +195,7 @@ class AttendanceRecord {
   final bool biometricVerified;
   final String? biometricMethod;
   final String? overrideReason;
+  final String? overrideBy;
   final SyncStatus syncStatus;
   final DateTime deviceRecordedAt;
   final int rowVersion;
@@ -204,6 +211,7 @@ class AttendanceRecord {
     this.biometricVerified = false,
     this.biometricMethod,
     this.overrideReason,
+    this.overrideBy,
     this.syncStatus = SyncStatus.pending,
     required this.deviceRecordedAt,
     this.rowVersion = 1,
@@ -220,6 +228,7 @@ class AttendanceRecord {
     bool? biometricVerified,
     String? biometricMethod,
     String? overrideReason,
+    String? overrideBy,
     SyncStatus? syncStatus,
     DateTime? deviceRecordedAt,
     int? rowVersion,
@@ -235,6 +244,7 @@ class AttendanceRecord {
         biometricVerified: biometricVerified ?? this.biometricVerified,
         biometricMethod: biometricMethod ?? this.biometricMethod,
         overrideReason: overrideReason ?? this.overrideReason,
+        overrideBy: overrideBy ?? this.overrideBy,
         syncStatus: syncStatus ?? this.syncStatus,
         deviceRecordedAt: deviceRecordedAt ?? this.deviceRecordedAt,
         rowVersion: rowVersion ?? this.rowVersion,
@@ -254,6 +264,7 @@ class AttendanceRecord {
         biometricVerified: (map['biometric_verified'] as int) == 1,
         biometricMethod: map['biometric_method'] as String?,
         overrideReason: map['override_reason'] as String?,
+        overrideBy: map['override_by'] as String?,
         syncStatus: SyncStatus.values.byName(map['sync_status'] as String),
         deviceRecordedAt: DateTime.parse(map['device_recorded_at'] as String),
         rowVersion: (map['row_version'] as int?) ?? 1,
@@ -270,6 +281,7 @@ class AttendanceRecord {
         'biometric_verified': biometricVerified ? 1 : 0,
         'biometric_method': biometricMethod,
         'override_reason': overrideReason,
+        'override_by': overrideBy,
         'sync_status': syncStatus.name,
         'device_recorded_at': deviceRecordedAt.toIso8601String(),
         'row_version': rowVersion,
@@ -277,6 +289,11 @@ class AttendanceRecord {
       };
 
   Map<String, dynamic> toSupabasePayload() => {
+        // Send the deterministic id (session id + student id) so a retried or
+        // duplicated check-in maps onto the same cloud row instead of relying on
+        // whichever id the database happened to assign first. The sync engine
+        // upserts on this column.
+        'id': id,
         'session_id': sessionId,
         'lecture_id': lectureId,
         'student_id': studentId,
@@ -285,6 +302,27 @@ class AttendanceRecord {
         'biometric_verified': biometricVerified,
         'biometric_method': biometricMethod,
         'override_reason': overrideReason,
+        'override_by': overrideBy,
         'device_recorded_at': deviceRecordedAt.toIso8601String(),
+      };
+}
+
+class SchoolSettings {
+  final bool excusedCountsAsAttended;
+
+  const SchoolSettings({this.excusedCountsAsAttended = false});
+
+  factory SchoolSettings.fromMap(Map<String, dynamic> map) => SchoolSettings(
+        excusedCountsAsAttended: map['excused_counts_as_attended'] == true ||
+            map['excused_counts_as_attended'] == 1,
+      );
+
+  Map<String, Object> toSqliteMap() => {
+        'id': 1,
+        'excused_counts_as_attended': excusedCountsAsAttended ? 1 : 0,
+      };
+
+  Map<String, Object> toSupabasePayload() => {
+        'excused_counts_as_attended': excusedCountsAsAttended,
       };
 }

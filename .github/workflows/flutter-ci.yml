@@ -1,0 +1,51 @@
+name: Flutter CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.6"
+          channel: stable
+          cache: true
+      - name: Install Flutter dependencies
+        working-directory: flutter_app
+        run: flutter pub get
+      - name: Analyze Flutter app
+        working-directory: flutter_app
+        run: flutter analyze
+      - name: Run Flutter tests
+        working-directory: flutter_app
+        run: flutter test
+
+  supabase-rls:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lectureguard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lectureguard_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run RLS integration tests
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql -X -v ON_ERROR_STOP=1
+          -h localhost -U postgres -d lectureguard_test
+          -f supabase/tests/rls_test.sql

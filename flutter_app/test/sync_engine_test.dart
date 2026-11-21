@@ -37,7 +37,7 @@ void main() {
     await database.close();
   });
 
-  SyncEngineService _engine(
+  SyncEngineService engine0(
     _FakeSupabaseHttpClient client, {
     Stream<List<ConnectivityResult>>? connectivityChanges,
     Future<List<ConnectivityResult>> Function()? connectivityCheck,
@@ -60,7 +60,7 @@ void main() {
     return engine;
   }
 
-  _FakeSupabaseHttpClient _client(
+  _FakeSupabaseHttpClient client0(
     Future<http.Response> Function(http.BaseRequest request, String body)
         handle,
   ) {
@@ -69,7 +69,7 @@ void main() {
     return client;
   }
 
-  AttendanceRecord _record(AttendanceSession session, int index) =>
+  AttendanceRecord record0(AttendanceSession session, int index) =>
       AttendanceRecord(
         id: 'record-${session.id}-$index',
         sessionId: session.id,
@@ -83,13 +83,13 @@ void main() {
             DateTime(2026, 11, 19, 9, 10).add(Duration(seconds: index)),
       );
 
-  Future<void> _addRecords(AttendanceSession session, int count) async {
+  Future<void> addRecords(AttendanceSession session, int count) async {
     for (var index = 0; index < count; index++) {
-      await database.upsertAttendanceRecord(_record(session, index));
+      await database.upsertAttendanceRecord(record0(session, index));
     }
   }
 
-  AttendanceSession _session(
+  AttendanceSession session0(
     String id, {
     required int enrolledCount,
   }) =>
@@ -105,7 +105,7 @@ void main() {
 
   test('continues after one records batch exhausts retries', () async {
     var failedBatchAttempts = 0;
-    final client = _client((request, body) async {
+    final client = client0((request, body) async {
       if (request.url.path.endsWith('/attendance_sessions')) {
         return http.Response('', 201);
       }
@@ -116,11 +116,11 @@ void main() {
       }
       return http.Response('', 201);
     });
-    final session = _session('session-partial', enrolledCount: 52);
+    final session = session0('session-partial', enrolledCount: 52);
     await database.createSessionIfAbsent(session);
-    await _addRecords(session, 52);
+    await addRecords(session, 52);
 
-    final result = await _engine(client).syncPendingRecords();
+    final result = await engine0(client).syncPendingRecords();
 
     final rows = await (await database.database).query('attendance_records');
     final failedRows =
@@ -142,29 +142,29 @@ void main() {
     expect(recordRequests, hasLength(4));
     expect(
       recordRequests.last.url.queryParameters['on_conflict'],
-      'session_id,student_id',
+      'id',
     );
     final uploadedRecord =
         jsonDecode(recordRequests.first.body).first as Map<String, dynamic>;
-    expect(uploadedRecord.containsKey('id'), isFalse);
+    expect(uploadedRecord['id'], startsWith('record-session-partial-'));
   });
 
   test('an edit during upload remains pending after the stale ack', () async {
     final uploadStarted = Completer<void>();
     final uploadResponse = Completer<http.Response>();
-    final client = _client((request, body) async {
+    final client = client0((request, body) async {
       if (request.url.path.endsWith('/attendance_records')) {
         if (!uploadStarted.isCompleted) uploadStarted.complete();
         return uploadResponse.future;
       }
       return http.Response('', 201);
     });
-    final session = _session('session-edit', enrolledCount: 1);
+    final session = session0('session-edit', enrolledCount: 1);
     await database.createSessionIfAbsent(session);
-    final original = _record(session, 1);
+    final original = record0(session, 1);
     await database.upsertAttendanceRecord(original);
 
-    final syncFuture = _engine(client).syncPendingRecords();
+    final syncFuture = engine0(client).syncPendingRecords();
     await uploadStarted.future.timeout(const Duration(seconds: 5));
 
     final current = (await database.getSessionRecords(session.id)).single;
@@ -192,11 +192,11 @@ void main() {
     var currentConnectivity = <ConnectivityResult>[];
     final firstResult = Completer<SyncResult>();
     final onlineResult = Completer<SyncResult>();
-    final client = _client((request, body) async => http.Response('', 201));
-    final session = _session('session-transition', enrolledCount: 1);
+    final client = client0((request, body) async => http.Response('', 201));
+    final session = session0('session-transition', enrolledCount: 1);
     await database.createSessionIfAbsent(session);
-    await database.upsertAttendanceRecord(_record(session, 1));
-    final engine = _engine(
+    await database.upsertAttendanceRecord(record0(session, 1));
+    final engine = engine0(
       client,
       connectivityChanges: connectivity.stream,
       connectivityCheck: () async => currentConnectivity,
@@ -227,7 +227,7 @@ void main() {
   });
 
   test('a poison session batch does not block later session batches', () async {
-    final client = _client((request, body) async {
+    final client = client0((request, body) async {
       if (request.url.path.endsWith('/attendance_sessions')) {
         final sessions = jsonDecode(body) as List<dynamic>;
         if (sessions.length == SyncEngineService.batchChunkSize) {
@@ -238,14 +238,14 @@ void main() {
     });
     final sessions = List.generate(
       SyncEngineService.batchChunkSize + 1,
-      (index) => _session('session-poison-$index', enrolledCount: 1),
+      (index) => session0('session-poison-$index', enrolledCount: 1),
     );
     for (var index = 0; index < sessions.length; index++) {
       await database.createSessionIfAbsent(sessions[index]);
-      await database.upsertAttendanceRecord(_record(sessions[index], index));
+      await database.upsertAttendanceRecord(record0(sessions[index], index));
     }
 
-    final result = await _engine(client).syncPendingRecords();
+    final result = await engine0(client).syncPendingRecords();
 
     final sessionRows =
         await (await database.database).query('attendance_sessions');
@@ -273,12 +273,12 @@ void main() {
   });
 
   test('submits an ended session after all of its records sync', () async {
-    final client = _client((request, body) async => http.Response('', 201));
-    final session = _session('session-submitted', enrolledCount: 0);
+    final client = client0((request, body) async => http.Response('', 201));
+    final session = session0('session-submitted', enrolledCount: 0);
     await database.createSessionIfAbsent(session);
     await database.endSession(session.id);
 
-    final result = await _engine(client).syncPendingRecords();
+    final result = await engine0(client).syncPendingRecords();
 
     final row = (await (await database.database).query(
       'attendance_sessions',
@@ -299,12 +299,12 @@ void main() {
 
   test('connectivity without Supabase reachability leaves rows queued',
       () async {
-    final client = _client((request, body) async => http.Response('', 201));
-    final session = _session('session-unreachable', enrolledCount: 1);
+    final client = client0((request, body) async => http.Response('', 201));
+    final session = session0('session-unreachable', enrolledCount: 1);
     await database.createSessionIfAbsent(session);
-    await database.upsertAttendanceRecord(_record(session, 1));
+    await database.upsertAttendanceRecord(record0(session, 1));
 
-    final result = await _engine(
+    final result = await engine0(
       client,
       reachabilityCheck: () async => false,
     ).syncPendingRecords();
@@ -313,6 +313,28 @@ void main() {
     expect(result.error, contains('unreachable'));
     expect(await database.getPendingSyncCount(), 1);
     expect(client.requests, isEmpty);
+  });
+
+  test('attendance record upserts send the deterministic id and conflict on it',
+      () async {
+    final client = client0((request, body) async => http.Response('', 201));
+    final session = session0('session-identity', enrolledCount: 1);
+    await database.createSessionIfAbsent(session);
+    await database.upsertAttendanceRecord(record0(session, 1));
+
+    await engine0(client).syncPendingRecords();
+
+    final recordRequests = client.requests
+        .where((request) => request.url.path.endsWith('/attendance_records'))
+        .toList();
+    expect(recordRequests, hasLength(1));
+    expect(recordRequests.single.url.queryParameters['on_conflict'], 'id');
+
+    final payload =
+        (jsonDecode(recordRequests.single.body) as List<dynamic>).single
+            as Map<String, dynamic>;
+    expect(payload['id'], 'record-session-identity-1');
+    expect(payload['student_id'], 'student-1');
   });
 }
 

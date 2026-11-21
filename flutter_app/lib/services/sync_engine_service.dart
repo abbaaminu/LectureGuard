@@ -241,7 +241,10 @@ class SyncEngineService {
           await _upsertChunkWithRetry(
             'attendance_records',
             chunk.map((record) => record.toSupabasePayload()).toList(),
-            'session_id,student_id',
+            // Records carry the deterministic (session, student) id, so the
+            // conflict target is the primary key. Upserting on the natural key
+            // instead used to leave the local and cloud ids out of step.
+            'id',
           );
           totalUploaded += await _localDb.markRecordsSynced(chunk);
         } catch (error) {

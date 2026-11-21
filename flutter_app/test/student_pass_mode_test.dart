@@ -155,7 +155,11 @@ class _OfflineSyncEngine extends SyncEngineService {
   _OfflineSyncEngine(LocalDatabaseService database)
       : super(
           database,
-          SupabaseClient('https://example.supabase.co', 'test-key'),
+          SupabaseClient(
+            'https://example.supabase.co',
+            'test-key',
+            authOptions: const AuthClientOptions(autoRefreshToken: false),
+          ),
         );
 
   @override
