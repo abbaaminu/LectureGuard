@@ -13,3 +13,5 @@ build/
 flutter_app/build/
 env.json
 flutter_app/env.json
+*.jks
+*.keystore
