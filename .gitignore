@@ -15,3 +15,8 @@ env.json
 flutter_app/env.json
 *.jks
 *.keystore
+.kotlin/
+.flutter-plugins-dependencies
+env.json
+*.jks
+key.properties

@@ -5,6 +5,7 @@ import 'providers/lecture_guard_providers.dart';
 import 'screens/lecturer_pin_setup_screen.dart';
 import 'services/background_sync_service.dart';
 import 'widgets/auth_gate.dart';
+import 'widgets/startup_error_app.dart';
 
 /// Returns null when the dart-define configuration is usable, otherwise a
 /// human-readable description of the first problem found.
@@ -44,13 +45,41 @@ Future<void> main() async {
     return;
   }
 
-  await Supabase.initialize(
-    url: supabaseUrl,
-    publishableKey: supabaseKey,
-  );
-  await initializeBackgroundSync();
+  _supabaseUrl = supabaseUrl;
+  _supabaseKey = supabaseKey;
+  await _startApp();
+}
 
-  runApp(const ProviderScope(child: LectureGuardApp()));
+/// Configured Supabase endpoint, kept so [_startApp] can be retried from
+/// [StartupErrorApp] without re-reading the compile-time dart-defines.
+String _supabaseUrl = '';
+String _supabaseKey = '';
+
+/// `Supabase.initialize` throws when called twice, so a retry only repeats the
+/// steps that have not succeeded yet.
+bool _supabaseInitialized = false;
+
+/// Initialises Supabase and the background sync worker, then shows the app.
+///
+/// Startup failures (unwritable storage, a broken keystore, a plugin that failed
+/// to register) are reported on [StartupErrorApp] instead of killing the
+/// process: the lecturer can retry and report the exception verbatim rather than
+/// watching the launcher icon bounce back to the home screen.
+Future<void> _startApp() async {
+  try {
+    if (!_supabaseInitialized) {
+      await Supabase.initialize(
+        url: _supabaseUrl,
+        publishableKey: _supabaseKey,
+      );
+      _supabaseInitialized = true;
+    }
+    await initializeBackgroundSync();
+    runApp(const ProviderScope(child: LectureGuardApp()));
+  } catch (error, stackTrace) {
+    debugPrint('LectureGuard startup failed: $error\n$stackTrace');
+    runApp(StartupErrorApp(error: error, onRetry: _startApp));
+  }
 }
 
 class LectureGuardApp extends ConsumerStatefulWidget {

@@ -49,6 +49,13 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // R8 runs for every Flutter release build. The Flutter engine rules
+            // are appended by the Flutter Gradle plugin; these app rules keep the
+            // reflection-based Android dependencies (Room/WorkManager) working.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
