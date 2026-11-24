@@ -47,6 +47,15 @@ android {
             signingConfig = if (keystorePropertiesFile.exists()) {
                 signingConfigs.getByName("release")
             } else {
+                // Never ship this APK: a debug-signed release has a different
+                // signature from the Play upload key, so updates fail to install
+                // and the artifact cannot be uploaded. Create android/key.properties
+                // (see the README) before publishing. Printed at quiet level so
+                // the message survives `flutter build`'s `-q` Gradle invocation.
+                println(
+                    "WARNING: LectureGuard android/key.properties is missing; the release " +
+                        "APK is signed with the debug key and must not be published.",
+                )
                 signingConfigs.getByName("debug")
             }
             // R8 runs for every Flutter release build. The Flutter engine rules
@@ -64,6 +73,16 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
+}
+
+dependencies {
+    // `LectureGuardApplication` implements `androidx.work.Configuration.Provider`
+    // so WorkManager is created on demand instead of in
+    // `androidx.startup.InitializationProvider`. The Flutter workmanager plugin
+    // depends on WorkManager with `implementation`, so it is not on this
+    // module's compile classpath; declare the same artifact (and version the
+    // plugin resolves, see workmanager/android/build.gradle) to reach the API.
+    implementation("androidx.work:work-runtime:2.9.0")
 }
 
 flutter {

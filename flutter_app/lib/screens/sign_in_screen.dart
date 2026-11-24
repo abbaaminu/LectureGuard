@@ -59,6 +59,18 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      Center(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(20),
+                          child: Image.asset(
+                            'assets/branding/app_icon.png',
+                            width: 88,
+                            height: 88,
+                            excludeFromSemantics: true,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
                       Text(
                         'LectureGuard',
                         style: Theme.of(context).textTheme.headlineMedium,

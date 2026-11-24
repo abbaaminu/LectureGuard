@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -31,6 +33,11 @@ String? validateSupabaseConfiguration({
   return null;
 }
 
+/// A startup step that hangs is as bad as one that throws: the lecturer is
+/// left staring at the native splash screen. Each step is bounded so the guard
+/// can take over and render [StartupErrorApp].
+const startupStepTimeout = Duration(seconds: 20);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -59,26 +66,103 @@ String _supabaseKey = '';
 /// steps that have not succeeded yet.
 bool _supabaseInitialized = false;
 
-/// Initialises Supabase and the background sync worker, then shows the app.
+/// Runs [initialize] and hands any failure to [showError] instead of letting it
+/// kill the process.
 ///
-/// Startup failures (unwritable storage, a broken keystore, a plugin that failed
-/// to register) are reported on [StartupErrorApp] instead of killing the
-/// process: the lecturer can retry and report the exception verbatim rather than
-/// watching the launcher icon bounce back to the home screen.
-Future<void> _startApp() async {
+/// This is the startup guard: every plugin initialised from [main] goes through
+/// it, so an unwritable database, a broken keystore or a plugin that failed to
+/// register produces a readable error screen with a Retry button rather than
+/// the system's "LectureGuard keeps stopping" dialog. It is kept separate from
+/// [main] so the error path can be exercised by tests.
+@visibleForTesting
+Future<void> runGuardedStartup({
+  required Future<void> Function() initialize,
+  required void Function() showApplication,
+  required void Function(Object error) showError,
+}) async {
   try {
-    if (!_supabaseInitialized) {
-      await Supabase.initialize(
-        url: _supabaseUrl,
-        publishableKey: _supabaseKey,
-      );
-      _supabaseInitialized = true;
-    }
-    await initializeBackgroundSync();
-    runApp(const ProviderScope(child: LectureGuardApp()));
+    await initialize();
+    showApplication();
   } catch (error, stackTrace) {
     debugPrint('LectureGuard startup failed: $error\n$stackTrace');
-    runApp(StartupErrorApp(error: error, onRetry: _startApp));
+    showError(error);
+  }
+}
+
+/// Runs the plugin startup steps, bounding each one so the guard is reached
+/// even when a plugin never answers.
+@visibleForTesting
+Future<void> initializeStartupServices({
+  required Future<void> Function() initializeSupabase,
+  required Future<void> Function() registerBackgroundSync,
+  Duration stepTimeout = startupStepTimeout,
+}) async {
+  await _bounded(
+    initializeSupabase(),
+    'Supabase initialisation',
+    stepTimeout,
+  );
+  await _bounded(
+    registerBackgroundSync(),
+    'Background sync registration',
+    stepTimeout,
+  );
+}
+
+Future<T> _bounded<T>(
+  Future<T> step,
+  String description,
+  Duration stepTimeout,
+) =>
+    step.timeout(
+      stepTimeout,
+      onTimeout: () => throw TimeoutException(
+        '$description did not finish within ${stepTimeout.inSeconds}s.',
+        stepTimeout,
+      ),
+    );
+
+/// Initialises Supabase and the background sync worker, then shows the app.
+///
+/// Startup failures are reported on [StartupErrorApp] instead of killing the
+/// process: the lecturer can retry and report the exception verbatim rather
+/// than watching the launcher icon bounce back to the home screen.
+Future<void> _startApp() async {
+  await runGuardedStartup(
+    initialize: () => initializeStartupServices(
+      initializeSupabase: _initializeSupabase,
+      registerBackgroundSync: initializeBackgroundSync,
+    ),
+    showApplication: () =>
+        runApp(const ProviderScope(child: LectureGuardApp())),
+    showError: (error) => runApp(
+      StartupErrorApp(error: error, onRetry: _startApp),
+    ),
+  );
+}
+
+Future<void> _initializeSupabase() async {
+  if (_supabaseInitialized) return;
+  try {
+    await Supabase.initialize(
+      url: _supabaseUrl,
+      publishableKey: _supabaseKey,
+    );
+  } catch (_) {
+    // `Supabase.initialize` throws when called twice. If the previous attempt
+    // timed out but completed afterwards, the client is usable and a retry must
+    // not report "already initialised" as a startup failure.
+    if (!_supabaseClientAvailable) rethrow;
+  }
+  _supabaseInitialized = true;
+}
+
+bool get _supabaseClientAvailable {
+  try {
+    Supabase.instance.client;
+    return true;
+  } catch (_) {
+    return false;
   }
 }
 

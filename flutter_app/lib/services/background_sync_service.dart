@@ -32,10 +32,7 @@ void backgroundSyncDispatcher() {
       throw StateError('Supabase is not configured for background sync.');
     }
 
-    await Supabase.initialize(
-      url: supabaseUrl,
-      publishableKey: supabaseKey,
-    );
+    await _initializeSupabase(supabaseUrl, supabaseKey);
     final database = LocalDatabaseService();
     final syncEngine = SyncEngineService(
       database,
@@ -49,4 +46,23 @@ void backgroundSyncDispatcher() {
       await database.close();
     }
   });
+}
+
+/// WorkManager may deliver several tasks to the same background isolate
+/// (Android keeps the engine alive between runs), and `Supabase.initialize`
+/// throws when called twice. Reuse the existing client in that case so the
+/// second sync does not fail with "Supabase is already initialised".
+Future<void> _initializeSupabase(String url, String key) async {
+  try {
+    await Supabase.initialize(url: url, publishableKey: key);
+  } catch (_) {
+    bool available;
+    try {
+      Supabase.instance.client;
+      available = true;
+    } catch (_) {
+      available = false;
+    }
+    if (!available) rethrow;
+  }
 }

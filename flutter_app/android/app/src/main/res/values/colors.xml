@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark teal used behind the launcher mark on API 26+ and as the splash
+         background on every API level; matches branding/lectureguard_icon.svg. -->
+    <color name="ic_launcher_background">#0B4F4A</color>
+    <color name="splash_background">#0B4F4A</color>
+</resources>

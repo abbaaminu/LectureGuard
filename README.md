@@ -145,6 +145,43 @@ flutter test
 The GitHub Actions workflow runs Flutter analysis and tests and executes the
 PostgreSQL 16 RLS integration tests in `supabase/tests/rls_test.sql`.
 
+## Release builds, signing and branding
+
+```powershell
+cd flutter_app
+flutter build apk --release --dart-define-from-file=env.json
+```
+
+Release builds are minified by R8. `android/app/proguard-rules.pro` keeps Room's
+generated database classes, WorkManager's workers and the Flutter workmanager
+plugin by name because they are resolved reflectively at startup; removing those
+rules reintroduces the "LectureGuard keeps stopping" crash on launch. WorkManager
+is created on demand by `LectureGuardApplication` (the default
+`androidx.startup` initialiser is removed in the manifest) so a failure there is
+reported by the in-app startup guard instead of killing the process.
+
+Signing is read from `flutter_app/android/key.properties`:
+
+```properties
+storePassword=...
+keyPassword=...
+keyAlias=upload
+storeFile=upload-keystore.jks
+```
+
+`storeFile` is resolved relative to `android/app`. Without that file the release
+APK is signed with the debug key; Gradle prints a warning and the artifact must
+not be published or installed as an update over a Play-signed build.
+
+The launcher icon, adaptive/themed icons, splash mark and iOS app icons all come
+from `branding/lectureguard_icon.svg`. Regenerate them after changing the
+artwork (Pillow is the only requirement):
+
+```powershell
+cd flutter_app
+python tool/generate_app_icons.py
+```
+
 ## Optional web prototype
 
 The React/Vite demonstration is separate from the Flutter app under

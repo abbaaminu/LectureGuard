@@ -1,11 +1,21 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
     <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
+    <!-- Local data is a cache: lectures, attendance and enrolments sync to
+         Supabase, while the PIN/session secrets live in Keystore-bound encrypted
+         storage that cannot be decrypted after a restore. Backups are disabled
+         so a restored copy can never carry unusable secrets or stale attendance
+         rows onto a new device. -->
     <application
         android:label="LectureGuard"
-        android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:name=".LectureGuardApplication"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -33,6 +43,23 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Create WorkManager on demand (from LectureGuardApplication, which
+             implements Configuration.Provider) instead of inside
+             androidx.startup.InitializationProvider while the process is
+             starting. Anything that throws there runs before the Flutter engine
+             exists, so it can only surface as "LectureGuard keeps stopping".
+             With on-demand initialisation the same failure is raised inside the
+             `Workmanager().initialize` platform call, where the Dart startup
+             guard can render StartupErrorApp instead of dying. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                tools:node="remove" />
+        </provider>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
