@@ -49,9 +49,20 @@ class PassModeLockService {
     }
   }
 
+  /// Leaves lock-task / pinned mode.
+  ///
+  /// Never throws: the exit path calls this after the admin PIN has already been
+  /// verified, so a platform failure must not be reported as a failed unlock or
+  /// leave the operator stuck inside a session that has already ended. The
+  /// platform side is idempotent when no task is locked.
   Future<void> stop() async {
-    if (Platform.isAndroid) {
+    if (!Platform.isAndroid) return;
+    try {
       await _channel.invokeMethod<void>('stopLockTask');
+    } on PlatformException {
+      // Nothing to do: the screen-pinning state is gone or was never engaged.
+    } on MissingPluginException {
+      // Host platform without the channel (tests, iOS fallback).
     }
   }
 }

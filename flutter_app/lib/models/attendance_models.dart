@@ -6,6 +6,23 @@ enum SyncStatus { pending, synced, failed }
 
 enum UserRole { admin, teacher, student }
 
+/// Maps a `profiles.role` value to a [UserRole] without throwing.
+///
+/// `UserRole.values.byName` raises an [ArgumentError] for anything it does not
+/// know, and that exception used to escape the sign-in flow and strand the user
+/// on the "could not load your school profile" screen whenever the database
+/// carried a role the shipped build predates (for example a role added by a
+/// newer migration). Unknown or missing values return `null`, which the access
+/// gate already renders as "no profile".
+UserRole? userRoleFromName(String? value) {
+  final normalized = value?.trim().toLowerCase();
+  if (normalized == null || normalized.isEmpty) return null;
+  for (final role in UserRole.values) {
+    if (role.name == normalized) return role;
+  }
+  return null;
+}
+
 class Student {
   final String id;
   final String studentCode;

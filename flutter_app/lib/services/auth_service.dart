@@ -24,9 +24,9 @@ class AuthService {
         .select('role')
         .eq('id', userId)
         .maybeSingle();
-    final role = profile?['role'] as String?;
-    if (role == null) return null;
-    return UserRole.values.byName(role);
+    // Unknown role values are treated as "no profile" rather than thrown: the
+    // access gate then shows its message instead of the screen failing.
+    return userRoleFromName(profile?['role'] as String?);
   }
 
   Future<void> signOut() => _client.auth.signOut();

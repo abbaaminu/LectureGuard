@@ -24,7 +24,9 @@ flutter run --dart-define-from-file=env.json
 The app shows a setup error screen if either Supabase value is missing, or if
 `SUPABASE_URL` is not an absolute `https://` URL (the anon key is sent as a
 header on every request and must never travel over plain HTTP). For Android,
-the project targets API level 23 or newer. For iOS, configure Face ID and
+release APKs require API level 24 (Android 7.0) or newer: `minSdk` follows
+`flutter.minSdkVersion`, which is 24 for the Flutter version pinned in
+`flutter_app/pubspec.yaml` and in CI. For iOS, configure Face ID and
 background fetch capabilities as appropriate for the deployment.
 
 ## Supabase migrations
@@ -181,6 +183,78 @@ artwork (Pillow is the only requirement):
 cd flutter_app
 python tool/generate_app_icons.py
 ```
+
+## Installing the APK on a phone
+
+```powershell
+cd flutter_app
+bash tool/build_release_apks.sh
+```
+
+The script builds both the universal APK (`app-release.apk`) and the per-ABI
+APKs (`app-arm64-v8a-release.apk`, `app-armeabi-v7a-release.apk`,
+`app-x86_64-release.apk`), then verifies each file with `zipalign -c` and
+`apksigner verify`, prints the signer and writes
+`build/app/outputs/flutter-apk/SHA256SUMS.txt`. It fails the build when an APK
+is unsigned, misaligned or missing the v1 (JAR) signature — the checks that
+decide whether an OEM package installer accepts the file.
+
+Re-check the APKs that are already built (seconds instead of a full build):
+
+```powershell
+bash tool/build_release_apks.sh --verify-only
+```
+
+`apksigner verify -v` only validates the v1 signature when the SDK range being
+checked includes an API level below 24, so pass `--min-sdk-version 21` when you
+run it by hand — without it a correctly v1+v2+v3 signed APK still reports
+`Verified using v1 scheme (JAR signing): false`. The script does this for you.
+
+Copy the APK **from this machine** instead of re-downloading a release asset, so
+a truncated download cannot masquerade as a broken build:
+
+```powershell
+# Phone connected over USB (debugging enabled, "File transfer" mode):
+adb install -r flutter_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+# Otherwise: copy the APK over USB/Bluetooth/Drive and tap it in the file manager.
+```
+
+`app-arm64-v8a-release.apk` covers essentially every phone from the last several
+years and is about a third of the universal size; use
+`app-armeabi-v7a-release.apk` only for older 32-bit devices and
+`app-x86_64-release.apk` for emulators. The universal `app-release.apk` runs on
+all three ABIs.
+
+If Android still refuses the file:
+
+1. **"App not installed as package appears to be invalid"** — almost always a
+   truncated or re-compressed download. Compare checksums before installing:
+   `sha256sum app-release.apk` on Linux/macOS,
+   `Get-FileHash -Algorithm SHA256 app-release.apk` in PowerShell, against the
+   matching line in `SHA256SUMS.txt`.
+2. **`INSTALL_FAILED_UPDATE_INCOMPATIBLE` / "App not installed" over an existing
+   copy** — a LectureGuard build signed with a different key is already on the
+   device (an older debug-key sideload, for example). End any running session,
+   then `adb uninstall com.lectureguard.lecture_guard` and install again. Data
+   stored under the app id is removed with it.
+3. **`INSTALL_FAILED_INSUFFICIENT_STORAGE`** — the installer needs roughly twice
+   the APK size free; prefer the per-ABI APK and free space.
+4. **"Install unknown apps"** — grant that permission to the app you tap the file
+   in (Files/Downloads), and open the APK from the file manager rather than from
+   an in-app browser preview, which often only offers a partial download.
+5. **Android version** — API 24 (Android 7.0) or newer is required; confirm with
+   `aapt2 dump badging app-release.apk | grep sdkVersion`.
+6. **`INSTALL_FAILED_VERSION_DOWNGRADE`** — the per-ABI APKs carry a higher
+   `versionCode` than the universal one (Flutter offsets it per ABI: `2002` for
+   `app-arm64-v8a-release.apk` against `2` for `app-release.apk`), so installing
+   the universal file over a per-ABI install reads as a downgrade. Uninstall
+   first, then install the file you want.
+
+Release APKs are signed with the v1 (JAR), v2 and v3 schemes
+(`android/app/build.gradle.kts`); v4 is requested as well, but its `.idsig`
+companion is written next to the APK rather than inside it. Keep
+`enableV1Signing = true` so strict OEM package installers keep accepting the
+artifact.
 
 ## Optional web prototype
 

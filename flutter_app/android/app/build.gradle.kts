@@ -32,6 +32,16 @@ android {
     }
 
     signingConfigs {
+        // The debug config signs `flutter run` / `--debug` builds and also the
+        // local release build used when android/key.properties is absent. Ask
+        // for v1+v2+v3 there too, otherwise those artifacts stay v2-only (AGP
+        // disables the JAR signature once minSdk >= 24) and strict OEM package
+        // installers reject them as an invalid package.
+        findByName("debug")?.apply {
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
         create("release") {
             if (keystorePropertiesFile.exists()) {
                 keyAlias = keystoreProperties.getProperty("keyAlias")
@@ -39,6 +49,17 @@ android {
                 storeFile = keystoreProperties.getProperty("storeFile")?.let { file(it) }
                 storePassword = keystoreProperties.getProperty("storePassword")
             }
+            // Sign with every signature scheme the platform understands.
+            // AGP only enables v2+ once minSdk reaches 24, and a v2-only APK is
+            // rejected with "App not installed as package appears to be
+            // invalid" by several OEM package installers and third-party file
+            // managers. The v1 (JAR) signature costs a few hundred kilobytes
+            // and makes the same artifact installable everywhere; v3/v4 add
+            // key-rotation and `adb install --incremental` support.
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
         }
     }
 
