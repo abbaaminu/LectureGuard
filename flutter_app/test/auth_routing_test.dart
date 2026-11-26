@@ -59,6 +59,33 @@ void main() {
     );
   });
 
+  test('start-up does not request school settings before sign-in', () async {
+    final onlineSync = _OnlineSyncEngine(database);
+    final onlineNotifier = LectureSessionNotifier(
+      database,
+      BiometricService(),
+      onlineSync,
+    );
+    addTearDown(onlineSync.dispose);
+    addTearDown(onlineNotifier.dispose);
+    await onlineNotifier.initialization;
+
+    // `school_settings` is readable only by a signed-in account, so the request
+    // used to fail with "permission denied" and leave a permanent banner on the
+    // first dashboard. Supabase is not initialised in this test, so any request
+    // would record an error here.
+    expect(onlineNotifier.hasSignedInUser, isFalse);
+    expect(onlineNotifier.state.schoolSettingsError, isNull);
+  });
+
+  test('a failed settings refresh is reported for the dashboard banner', () {
+    expect(notifier.state.schoolSettingsError, isNull);
+
+    notifier.reportSchoolSettingsError(StateError('permission denied'));
+
+    expect(notifier.state.schoolSettingsError, contains('permission denied'));
+  });
+
   test('a teacher with a locked Pass Mode session is routed to Pass Mode', () {
     final session = AttendanceSession(
       id: 'session-1',
@@ -217,4 +244,13 @@ class _OfflineSyncEngine extends SyncEngineService {
     void Function(SyncProgress progress)? onBatchProgress,
     void Function(SyncResult result)? onSyncComplete,
   }) {}
+}
+
+/// Reports an online transport without a session, which is what used to trigger
+/// the anonymous `school_settings` request at start-up.
+class _OnlineSyncEngine extends _OfflineSyncEngine {
+  _OnlineSyncEngine(super.database);
+
+  @override
+  Future<NetworkTransport> currentTransport() async => NetworkTransport.wifi;
 }

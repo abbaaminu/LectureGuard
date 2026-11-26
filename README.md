@@ -46,9 +46,35 @@ Apply these SQL files in order using the Supabase CLI or SQL editor:
    reporting views and the chronic-absence page working when the single
    `school_settings` row is missing (excused absences then use the documented
    default of not counting as attended).
+6. `supabase/migrations/006_grants_and_role_provisioning.sql` — grants the
+   `anon`/`authenticated` table privileges that 001-005 never added (RLS
+   filters rows but does not grant access, so every anon-key request used to
+   fail with `permission denied for table ...`), backfills missing profiles,
+   and provisions a profile/role for each new auth user.
 
-Configure admin and teacher roles through trusted administrative provisioning.
-The client uses only the anon/publishable key; RLS enforces access.
+### Accounts, profiles and roles
+
+A `public.profiles` row is created automatically for every new `auth.users`
+row by the `on_auth_user_created` trigger. The role comes from
+`raw_app_meta_data.role` (only the service role or a dashboard administrator
+can write it); anything else, including a self-asserted
+`raw_user_meta_data.role` from public sign-up, becomes `student`.
+
+To provision or change a role, use one of these — never edit
+`public.profiles` by hand:
+
+- Dashboard → Authentication → Users → *Edit user* → *App metadata*:
+  `{ "role": "teacher" }`. The `on_auth_user_role_changed` trigger copies it
+  to the profile.
+- SQL editor or an admin session:
+  `select public.admin_set_user_role('teacher@school.edu', 'teacher');`
+- Accounts that exist without any profile (imported, or created while the
+  trigger was missing) are repaired with
+  `select public.backfill_profiles_from_auth_users();` — it returns how many
+  profiles it inserted.
+
+Both helpers are revoked from `anon`, so the publishable key cannot change
+roles. The client uses only the anon/publishable key; RLS enforces access.
 
 ## Attendance and biometric limitations
 

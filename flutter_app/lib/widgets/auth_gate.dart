@@ -56,6 +56,9 @@ class _AuthGateState extends ConsumerState<AuthGate> {
   Future<UserRole?> _loadRoleAndSession(String userId) async {
     final notifier = ref.read(lectureSessionProvider.notifier);
     await notifier.initialization;
+    // Start-up cannot read `school_settings` (its policy requires a signed-in
+    // account), so a refresh that was skipped or rejected is retried here.
+    await notifier.ensureSchoolSettingsFresh();
     final role = await ref.read(authServiceProvider).getProfileRole(userId);
     if (role == UserRole.teacher) {
       await notifier.restoreActiveSession(userId);
@@ -97,9 +100,12 @@ class _AuthGateState extends ConsumerState<AuthGate> {
         final role = snapshot.data;
         final screen = authGateScreenForRole(role, sessionState);
         if (screen != null) return screen;
+        final signedInAs = _session?.user.email;
         return _AccessMessage(
           message: role == null
-              ? 'Your account does not have a school profile yet.'
+              ? 'Your account${signedInAs == null ? '' : ' ($signedInAs)'} does '
+                  'not have a school profile yet. An administrator has to '
+                  'provision it, then sign out and back in.'
               : 'This account role is not supported.',
           onSignOut: () => ref.read(authServiceProvider).signOut(),
         );

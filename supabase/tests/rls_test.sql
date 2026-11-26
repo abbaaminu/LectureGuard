@@ -30,7 +30,8 @@ CREATE SCHEMA auth;
 CREATE TABLE auth.users (
   id uuid PRIMARY KEY,
   email text,
-  raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb
+  raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  raw_app_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 CREATE FUNCTION auth.uid()
 RETURNS uuid
@@ -47,6 +48,7 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
 \ir ../migrations/003_school_settings_and_analytics.sql
 \ir ../migrations/004_harden_teacher_submission_logs.sql
 \ir ../migrations/005_school_settings_left_join.sql
+\ir ../migrations/006_grants_and_role_provisioning.sql
 
 DO $$
 BEGIN
@@ -62,13 +64,68 @@ BEGIN
 END;
 $$;
 
-GRANT USAGE ON SCHEMA public TO anon, authenticated;
-GRANT SELECT ON public.profiles, public.students, public.lectures, public.enrollments,
-  public.attendance_sessions, public.attendance_records
-  TO anon, authenticated;
-GRANT INSERT, UPDATE, DELETE ON public.profiles, public.students, public.lectures,
-  public.enrollments, public.attendance_sessions, public.attendance_records
-  TO authenticated;
+-- The client roles' privileges come from migration 006. This block used to
+-- grant them locally, which hid the fact that the Supabase project had no
+-- GRANTs at all and every anon-key request failed with
+-- "permission denied for table ...". Do not grant anything here.
+DO $$
+DECLARE
+  rel text;
+BEGIN
+  FOREACH rel IN ARRAY ARRAY[
+    'profiles', 'students', 'lectures', 'enrollments',
+    'attendance_sessions', 'attendance_records'
+  ] LOOP
+    IF NOT has_table_privilege('authenticated', 'public.' || rel, 'SELECT')
+       OR NOT has_table_privilege('authenticated', 'public.' || rel, 'INSERT')
+       OR NOT has_table_privilege('authenticated', 'public.' || rel, 'UPDATE')
+       OR NOT has_table_privilege('authenticated', 'public.' || rel, 'DELETE') THEN
+      RAISE EXCEPTION
+        'authenticated is missing a table privilege on public.% (migration 006)',
+        rel;
+    END IF;
+    IF NOT has_table_privilege('anon', 'public.' || rel, 'SELECT') THEN
+      RAISE EXCEPTION
+        'anon cannot SELECT public.%; RLS, not a missing GRANT, must return zero rows',
+        rel;
+    END IF;
+    IF has_table_privilege('anon', 'public.' || rel, 'INSERT')
+       OR has_table_privilege('anon', 'public.' || rel, 'UPDATE')
+       OR has_table_privilege('anon', 'public.' || rel, 'DELETE') THEN
+      RAISE EXCEPTION 'anon unexpectedly holds a write privilege on public.%', rel;
+    END IF;
+  END LOOP;
+
+  IF NOT has_table_privilege('authenticated', 'public.school_settings', 'SELECT')
+     OR NOT has_table_privilege('authenticated', 'public.school_settings', 'UPDATE') THEN
+    RAISE EXCEPTION 'authenticated is missing the school_settings privileges';
+  END IF;
+  IF NOT has_function_privilege(
+       'authenticated', 'public.current_user_role()', 'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       'authenticated', 'public.is_enrolled_in(uuid,uuid)', 'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       'authenticated', 'public.teaches_lecture(uuid,uuid)', 'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       'authenticated',
+       'public.admin_set_user_role(text,public.user_role)',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION 'authenticated is missing an EXECUTE grant from migration 006';
+  END IF;
+  IF has_function_privilege(
+       'anon', 'public.admin_set_user_role(text,public.user_role)', 'EXECUTE'
+     )
+     OR has_function_privilege(
+       'anon', 'public.backfill_profiles_from_auth_users()', 'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION 'anon can execute a role-provisioning function';
+  END IF;
+END;
+$$;
 
 INSERT INTO auth.users (id, email, raw_user_meta_data) VALUES
   ('00000000-0000-0000-0000-000000000001', 'admin@example.test', '{"full_name":"Admin"}'),
@@ -149,9 +206,67 @@ BEGIN
 END;
 $$;
 
+-- Migration 006 provisions the role from `raw_app_meta_data`, which only the
+-- service role or a dashboard administrator can write. `raw_user_meta_data` is
+-- self-asserted during public sign-up and must never grant a role.
+INSERT INTO auth.users (id, email, raw_user_meta_data, raw_app_meta_data) VALUES
+  ('00000000-0000-0000-0000-000000000007', 'provisioned.teacher@example.test',
+   '{}', '{"role":"teacher"}'),
+  ('00000000-0000-0000-0000-000000000008', 'selfappointed@example.test',
+   '{"role":"admin"}', '{}');
+DO $$
+BEGIN
+  IF (SELECT role FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000007') <> 'teacher' THEN
+    RAISE EXCEPTION 'app metadata role was not applied to a new profile';
+  END IF;
+  IF (SELECT role FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000008') <> 'student' THEN
+    RAISE EXCEPTION 'self-asserted user metadata escalated a new account';
+  END IF;
+END;
+$$;
+
+-- Changing app metadata (dashboard user editor or Admin API) follows through to
+-- the profile, so no manual profiles.role edit is needed.
+UPDATE auth.users
+SET raw_app_meta_data = '{"role":"teacher"}'
+WHERE id = '00000000-0000-0000-0000-000000000008';
+DO $$
+BEGIN
+  IF (SELECT role FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000008') <> 'teacher' THEN
+    RAISE EXCEPTION 'app metadata update did not update the profile role';
+  END IF;
+END;
+$$;
+
+-- Accounts that exist without a profile (created before the trigger, or while
+-- the trigger was missing) are repaired by the backfill helper.
+DELETE FROM public.profiles
+WHERE id = '00000000-0000-0000-0000-000000000008';
+DO $$
+DECLARE
+  restored integer;
+BEGIN
+  SELECT public.backfill_profiles_from_auth_users() INTO restored;
+  IF restored <> 1 THEN
+    RAISE EXCEPTION 'backfill inserted % profiles, expected 1', restored;
+  END IF;
+  IF (SELECT role FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000008') <> 'teacher'
+     OR (SELECT full_name FROM public.profiles
+         WHERE id = '00000000-0000-0000-0000-000000000008')
+        <> 'selfappointed' THEN
+    RAISE EXCEPTION 'backfill did not restore the missing profile';
+  END IF;
+END;
+$$;
+
 -- Anonymous clients cannot select either view or execute the staff log
--- function, even though table grants below deliberately allow testing that the
--- view ACL itself blocks access.
+-- function. Migration 006 deliberately grants table SELECT to `anon` so these
+-- assertions prove the view/function ACLs themselves block access (RLS is what
+-- returns zero rows from the base tables).
 DO $$
 BEGIN
   IF has_table_privilege('anon', 'public.v_student_attendance_summary', 'SELECT')
@@ -249,6 +364,18 @@ BEGIN
   IF (SELECT excused_counts_as_attended
       FROM public.school_settings WHERE id = 1) THEN
     RAISE EXCEPTION 'school setting did not default to not counting excused';
+  END IF;
+
+  -- A student cannot promote any account, including their own.
+  BEGIN
+    PERFORM public.admin_set_user_role('student1@example.test', 'admin');
+    RAISE EXCEPTION 'student changed an account role';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  IF (SELECT role FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000004') <> 'student' THEN
+    RAISE EXCEPTION 'a rejected role change still modified the profile';
   END IF;
 
   SELECT * INTO summary
@@ -421,6 +548,20 @@ BEGIN
   SET excused_counts_as_attended = FALSE,
       updated_by = auth.uid()
   WHERE id = 1;
+
+  -- Role assignment is a supported administrator action, so provisioning a
+  -- teacher no longer requires editing public.profiles by hand. Email matching
+  -- is case-insensitive and surrounding whitespace is ignored.
+  IF public.admin_set_user_role(
+       '  PROVISIONED.TEACHER@example.test ', 'student'
+     ) <> '00000000-0000-0000-0000-000000000007' THEN
+    RAISE EXCEPTION 'admin_set_user_role returned the wrong profile id';
+  END IF;
+  IF (SELECT role FROM public.profiles
+      WHERE id = '00000000-0000-0000-0000-000000000007') <> 'student' THEN
+    RAISE EXCEPTION 'admin_set_user_role did not apply the role';
+  END IF;
+
   IF (SELECT count(*) FROM public.admin_chronic_absentee_page(
         'STU-1', 13::smallint, DATE '2026-10-01', DATE '2026-10-05'
       )) <> 1 THEN

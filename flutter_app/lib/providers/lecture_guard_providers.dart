@@ -130,6 +130,7 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   final _uuid = const Uuid();
   late final Future<void> initialization;
   bool _disposed = false;
+  bool _schoolSettingsLoadedFromNetwork = false;
 
   LectureSessionNotifier(this._db, this._biometrics, this._syncEngine)
       : super(const SessionState()) {
@@ -162,11 +163,9 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
         _setState((current) => current.copyWith(
               networkTransport: transport,
             ));
-        if (transport != NetworkTransport.offline) {
+        if (transport != NetworkTransport.offline && hasSignedInUser) {
           unawaited(refreshSchoolSettings().catchError((Object error) {
-            _setState((current) => current.copyWith(
-                  schoolSettingsError: error.toString(),
-                ));
+            reportSchoolSettingsError(error);
           }));
         }
       },
@@ -187,15 +186,47 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
             ));
       },
     );
-    if (initialTransport != NetworkTransport.offline) {
+    if (initialTransport != NetworkTransport.offline && hasSignedInUser) {
       try {
         await refreshSchoolSettings();
       } catch (error) {
-        _setState((current) => current.copyWith(
-              schoolSettingsError: error.toString(),
-            ));
+        reportSchoolSettingsError(error);
       }
     }
+  }
+
+  /// `school_settings` is only readable by signed-in accounts, so an anonymous
+  /// start-up must fall back to the cached row. Requesting it before sign-in
+  /// always failed with "permission denied for table school_settings" and left
+  /// an error banner on the first dashboard the user opened. Returns false when
+  /// Supabase itself is not initialised (unit tests, startup failure).
+  bool get hasSignedInUser {
+    try {
+      return Supabase.instance.client.auth.currentSession != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Refreshes the school-wide setting once a session exists. The start-up pass
+  /// already succeeds when a session was restored, so this only repeats a
+  /// failed or skipped attempt instead of fetching the same row twice.
+  Future<void> ensureSchoolSettingsFresh() async {
+    if (_schoolSettingsLoadedFromNetwork && state.schoolSettingsError == null) {
+      return;
+    }
+    try {
+      await refreshSchoolSettings();
+    } catch (error) {
+      reportSchoolSettingsError(error);
+    }
+  }
+
+  /// Records a failed settings refresh so the dashboard banner can surface it.
+  void reportSchoolSettingsError(Object error) {
+    _setState((current) => current.copyWith(
+          schoolSettingsError: error.toString(),
+        ));
   }
 
   Future<void> refreshSchoolSettings() async {
@@ -209,6 +240,7 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     }
     final settings = SchoolSettings.fromMap(row);
     await _db.cacheSchoolSettings(settings);
+    _schoolSettingsLoadedFromNetwork = true;
     _setState((current) => current.copyWith(
           excusedCountsAsAttended: settings.excusedCountsAsAttended,
           clearSchoolSettingsError: true,
@@ -238,9 +270,7 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
             clearSchoolSettingsError: true,
           ));
     } catch (error) {
-      _setState((current) => current.copyWith(
-            schoolSettingsError: error.toString(),
-          ));
+      reportSchoolSettingsError(error);
       rethrow;
     }
   }
