@@ -6,7 +6,7 @@ import 'session_ids.dart';
 
 class LocalDatabaseService {
   static const _dbName = 'lecture_guard_v1.db';
-  static const _dbVersion = 4;
+  static const _dbVersion = 9;
 
   final DatabaseFactory _databaseFactory;
   final String? _databasePath;
@@ -57,7 +57,19 @@ class LocalDatabaseService {
             teacher_name TEXT NOT NULL,
             room_number TEXT NOT NULL,
             period_number INTEGER NOT NULL,
+            academic_term TEXT NOT NULL DEFAULT 'TBD',
             late_grace_minutes INTEGER NOT NULL DEFAULT 10
+          );
+          ''');
+
+          await db.execute('''
+          CREATE TABLE pending_lecture_timetable_updates (
+            lecture_id TEXT PRIMARY KEY,
+            teacher_id TEXT NOT NULL,
+            room_number TEXT NOT NULL,
+            period_number INTEGER NOT NULL,
+            academic_term TEXT NOT NULL,
+            late_grace_minutes INTEGER NOT NULL
           );
           ''');
 
@@ -117,6 +129,8 @@ class LocalDatabaseService {
             excused_counts_as_attended INTEGER NOT NULL DEFAULT 0
           );
           ''');
+          await _createAdminCacheTables(db);
+          await _createUserRoleCacheTable(db);
           await db.insert('school_settings', {
             'id': 1,
             'excused_counts_as_attended': 0,
@@ -188,9 +202,102 @@ class LocalDatabaseService {
               {'id': 1, 'excused_counts_as_attended': 0},
             );
           }
+          if (oldVersion < 5) {
+            final lectureColumns =
+                await db.rawQuery('PRAGMA table_info(lectures);');
+            if (lectureColumns.isEmpty) {
+              await db.execute('''
+                CREATE TABLE lectures (
+                  id TEXT PRIMARY KEY,
+                  course_code TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  teacher_id TEXT NOT NULL,
+                  teacher_name TEXT NOT NULL,
+                  room_number TEXT NOT NULL,
+                  period_number INTEGER NOT NULL,
+                  academic_term TEXT NOT NULL DEFAULT 'TBD',
+                  late_grace_minutes INTEGER NOT NULL DEFAULT 10
+                );
+              ''');
+            } else {
+              await db.execute(
+                "ALTER TABLE lectures ADD COLUMN academic_term TEXT NOT NULL DEFAULT 'TBD';",
+              );
+            }
+          }
+          if (oldVersion < 6) {
+            await db.execute('''
+              CREATE TABLE pending_lecture_timetable_updates (
+                lecture_id TEXT PRIMARY KEY,
+                teacher_id TEXT NOT NULL,
+                room_number TEXT NOT NULL,
+                period_number INTEGER NOT NULL,
+                academic_term TEXT NOT NULL,
+                late_grace_minutes INTEGER NOT NULL
+              );
+            ''');
+          }
+          if (oldVersion < 7) {
+            await _createAdminCacheTables(db);
+          }
+          if (oldVersion < 8) {
+            await _createUserRoleCacheTable(db);
+          }
+          if (oldVersion < 9) {
+            final cacheColumns = await db.rawQuery(
+              'PRAGMA table_info(admin_students_cache);',
+            );
+            if (cacheColumns.isNotEmpty &&
+                !cacheColumns.any((column) => column['name'] == 'profile_id')) {
+              await db.execute(
+                'ALTER TABLE admin_students_cache ADD COLUMN profile_id TEXT;',
+              );
+            }
+          }
         },
       ),
     );
+  }
+
+  Future<void> _createUserRoleCacheTable(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE user_profile_role_cache (
+        user_id TEXT PRIMARY KEY,
+        role TEXT NOT NULL,
+        cached_at TEXT NOT NULL
+      )
+    ''');
+  }
+
+  Future<void> _createAdminCacheTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE admin_profiles_cache (
+        id TEXT PRIMARY KEY,
+        full_name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        role TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE admin_students_cache (
+        id TEXT PRIMARY KEY,
+        student_code TEXT NOT NULL UNIQUE,
+        first_name TEXT NOT NULL,
+        last_name TEXT NOT NULL,
+        grade_level INTEGER NOT NULL,
+        homeroom TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        profile_id TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE admin_enrollments_cache (
+        lecture_id TEXT NOT NULL,
+        student_id TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (lecture_id, student_id)
+      )
+    ''');
   }
 
   Future<void> close() async {
@@ -242,6 +349,293 @@ class LocalDatabaseService {
       );
     }
     await batch.commit(noResult: true);
+  }
+
+  Future<void> cacheAdminProfiles(List<Map<String, dynamic>> profiles) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('admin_profiles_cache');
+      final batch = txn.batch();
+      for (final profile in profiles) {
+        batch.insert(
+          'admin_profiles_cache',
+          {
+            'id': profile['id'],
+            'full_name': profile['full_name'],
+            'email': profile['email'],
+            'role': profile['role'],
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<List<Map<String, Object?>>> getCachedAdminProfiles() async {
+    final db = await database;
+    return db.query('admin_profiles_cache',
+        orderBy: 'full_name COLLATE NOCASE');
+  }
+
+  Future<void> cacheUserProfileRole(String userId, String? role) async {
+    final db = await database;
+    if (role == null) {
+      await db.delete(
+        'user_profile_role_cache',
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      return;
+    }
+    await db.insert(
+      'user_profile_role_cache',
+      {
+        'user_id': userId,
+        'role': role,
+        'cached_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<String?> getCachedUserProfileRole(String userId) async {
+    final db = await database;
+    final rows = await db.query(
+      'user_profile_role_cache',
+      columns: ['role'],
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.single['role'] as String;
+  }
+
+  Future<void> cacheAdminStudents(List<Map<String, dynamic>> students) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('admin_students_cache');
+      final batch = txn.batch();
+      for (final student in students) {
+        batch.insert(
+          'admin_students_cache',
+          _adminStudentSqliteMap(student),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+      for (final student in students) {
+        await _cacheRosterStudent(txn, student);
+      }
+    });
+  }
+
+  Future<List<Map<String, Object?>>> getCachedAdminStudents() async {
+    final db = await database;
+    return db.query(
+      'admin_students_cache',
+      orderBy: 'last_name COLLATE NOCASE, first_name COLLATE NOCASE',
+    );
+  }
+
+  Future<void> cacheAdminStudent(Map<String, dynamic> student) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.insert(
+        'admin_students_cache',
+        _adminStudentSqliteMap(student),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await _cacheRosterStudent(txn, student);
+    });
+  }
+
+  Future<void> _cacheRosterStudent(
+    DatabaseExecutor db,
+    Map<String, dynamic> student,
+  ) async {
+    await db.insert(
+      'students',
+      {
+        'id': student['id'],
+        'student_code': student['student_code'],
+        'first_name': student['first_name'],
+        'last_name': student['last_name'],
+        'grade_level': student['grade_level'],
+        'homeroom': student['homeroom'],
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    if (student['active'] != true && student['active'] != 1) {
+      await db.delete(
+        'enrollments',
+        where: 'student_id = ?',
+        whereArgs: [student['id']],
+      );
+    }
+  }
+
+  Map<String, Object?> _adminStudentSqliteMap(Map<String, dynamic> student) => {
+        'id': student['id'],
+        'student_code': student['student_code'],
+        'first_name': student['first_name'],
+        'last_name': student['last_name'],
+        'grade_level': student['grade_level'],
+        'homeroom': student['homeroom'],
+        'active': student['active'] == true || student['active'] == 1 ? 1 : 0,
+        'profile_id': student['profile_id'],
+      };
+
+  Future<void> cacheAdminEnrollments(
+    String lectureId,
+    List<Map<String, dynamic>> enrollments,
+  ) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete(
+        'admin_enrollments_cache',
+        where: 'lecture_id = ?',
+        whereArgs: [lectureId],
+      );
+      final batch = txn.batch();
+      for (final enrollment in enrollments) {
+        batch.insert(
+          'admin_enrollments_cache',
+          {
+            'lecture_id': lectureId,
+            'student_id': enrollment['student_id'],
+            'active': enrollment['active'] == true || enrollment['active'] == 1
+                ? 1
+                : 0,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<List<Map<String, Object?>>> getCachedAdminEnrollments(
+      String lectureId) async {
+    final db = await database;
+    return db.query(
+      'admin_enrollments_cache',
+      where: 'lecture_id = ?',
+      whereArgs: [lectureId],
+      orderBy: 'student_id',
+    );
+  }
+
+  Future<void> cacheAdminEnrollment({
+    required String lectureId,
+    required String studentId,
+    required bool active,
+  }) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.insert(
+        'admin_enrollments_cache',
+        {
+          'lecture_id': lectureId,
+          'student_id': studentId,
+          'active': active ? 1 : 0,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      if (active) {
+        final studentRows = await txn.query(
+          'admin_students_cache',
+          where: 'id = ? AND active = 1',
+          whereArgs: [studentId],
+          limit: 1,
+        );
+        if (studentRows.isEmpty) {
+          throw StateError(
+            'Cannot cache enrollment for a student missing from the local cache.',
+          );
+        }
+        final student = studentRows.single;
+        await txn.insert(
+          'students',
+          {
+            'id': student['id'],
+            'student_code': student['student_code'],
+            'first_name': student['first_name'],
+            'last_name': student['last_name'],
+            'grade_level': student['grade_level'],
+            'homeroom': student['homeroom'],
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await txn.insert(
+          'enrollments',
+          {'lecture_id': lectureId, 'student_id': studentId},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      } else {
+        await txn.delete(
+          'enrollments',
+          where: 'lecture_id = ? AND student_id = ?',
+          whereArgs: [lectureId, studentId],
+        );
+      }
+    });
+  }
+
+  Future<void> cachePendingLectureTimetableEdit(Lecture lecture) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.insert(
+        'lectures',
+        lecture.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.insert(
+        'pending_lecture_timetable_updates',
+        {
+          'lecture_id': lecture.id,
+          'teacher_id': lecture.teacherId,
+          'room_number': lecture.roomNumber,
+          'period_number': lecture.periodNumber,
+          'academic_term': lecture.academicTerm,
+          'late_grace_minutes': lecture.lateGraceMinutes,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+  }
+
+  Future<List<Lecture>> getPendingLectureTimetableEdits(
+      String teacherId) async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT lectures.*
+      FROM lectures
+      INNER JOIN pending_lecture_timetable_updates AS pending
+        ON pending.lecture_id = lectures.id
+      WHERE pending.teacher_id = ?
+      ORDER BY lectures.period_number
+    ''', [teacherId]);
+    return rows.map(Lecture.fromMap).toList();
+  }
+
+  Future<int> getPendingLectureTimetableEditCount(String teacherId) async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT COUNT(*) AS cnt
+      FROM pending_lecture_timetable_updates
+      WHERE teacher_id = ?
+    ''', [teacherId]);
+    return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  Future<void> clearPendingLectureTimetableEdit(String lectureId) async {
+    final db = await database;
+    await db.delete(
+      'pending_lecture_timetable_updates',
+      where: 'lecture_id = ?',
+      whereArgs: [lectureId],
+    );
   }
 
   Future<List<Lecture>> getCachedLectures({String? teacherId}) async {
@@ -339,10 +733,26 @@ class LocalDatabaseService {
   }
 
   Future<AttendanceSession> createSessionIfAbsent(
-    AttendanceSession session,
-  ) async {
+    AttendanceSession session, {
+    bool rejectTeacherDateConflict = false,
+  }) async {
     final db = await database;
     return db.transaction((txn) async {
+      if (rejectTeacherDateConflict) {
+        final conflictingSessions = await txn.query(
+          'attendance_sessions',
+          where: 'teacher_id = ? AND session_date = ? AND ended_at IS NULL',
+          whereArgs: [session.teacherId, session.sessionDate],
+        );
+        if (conflictingSessions.any(
+          (row) => row['lecture_id'] != session.lectureId,
+        )) {
+          throw StateError(
+            'Another course already has an active session today. End it before starting this course.',
+          );
+        }
+      }
+
       await txn.insert(
         'attendance_sessions',
         {...session.toMap(), 'sync_status': SyncStatus.pending.name},
@@ -371,6 +781,20 @@ class LocalDatabaseService {
       limit: 1,
     );
     return rows.isEmpty ? null : AttendanceSession.fromMap(rows.first);
+  }
+
+  Future<List<AttendanceSession>> getSessionsForTeacherOnDate(
+    String teacherId,
+    String sessionDate,
+  ) async {
+    final db = await database;
+    final rows = await db.query(
+      'attendance_sessions',
+      where: 'teacher_id = ? AND session_date = ?',
+      whereArgs: [teacherId, sessionDate],
+      orderBy: 'started_at DESC',
+    );
+    return rows.map(AttendanceSession.fromMap).toList();
   }
 
   Future<void> setSessionPassModeLocked(
@@ -703,12 +1127,12 @@ class LocalDatabaseService {
     );
   }
 
-  Future<void> markSessionSubmissionSynced(
+  Future<int> markSessionSubmissionSynced(
     String sessionId,
     String submittedAt,
   ) async {
     final db = await database;
-    await db.update(
+    return db.update(
       'attendance_sessions',
       {'submitted_to_cloud_synced': 1},
       where: 'id = ? AND submitted_to_cloud_at = ?',

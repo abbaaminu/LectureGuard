@@ -76,6 +76,7 @@ class Lecture {
   final String teacherName;
   final String roomNumber;
   final int periodNumber;
+  final String academicTerm;
   final int lateGraceMinutes;
 
   const Lecture({
@@ -86,8 +87,27 @@ class Lecture {
     required this.teacherName,
     required this.roomNumber,
     required this.periodNumber,
+    this.academicTerm = 'TBD',
     this.lateGraceMinutes = 10,
   });
+
+  Lecture copyWith({
+    String? roomNumber,
+    int? periodNumber,
+    String? academicTerm,
+    int? lateGraceMinutes,
+  }) =>
+      Lecture(
+        id: id,
+        courseCode: courseCode,
+        title: title,
+        teacherId: teacherId,
+        teacherName: teacherName,
+        roomNumber: roomNumber ?? this.roomNumber,
+        periodNumber: periodNumber ?? this.periodNumber,
+        academicTerm: academicTerm ?? this.academicTerm,
+        lateGraceMinutes: lateGraceMinutes ?? this.lateGraceMinutes,
+      );
 
   factory Lecture.fromMap(Map<String, dynamic> map) => Lecture(
         id: map['id'] as String,
@@ -97,6 +117,7 @@ class Lecture {
         teacherName: (map['teacher_name'] as String?) ?? 'Faculty',
         roomNumber: map['room_number'] as String,
         periodNumber: map['period_number'] as int,
+        academicTerm: (map['academic_term'] as String?) ?? 'TBD',
         lateGraceMinutes: (map['late_grace_minutes'] as int?) ?? 10,
       );
 
@@ -108,8 +129,27 @@ class Lecture {
         'teacher_name': teacherName,
         'room_number': roomNumber,
         'period_number': periodNumber,
+        'academic_term': academicTerm,
         'late_grace_minutes': lateGraceMinutes,
       };
+}
+
+class TeacherProfile {
+  final String id;
+  final String fullName;
+  final String email;
+
+  const TeacherProfile({
+    required this.id,
+    required this.fullName,
+    required this.email,
+  });
+
+  factory TeacherProfile.fromMap(Map<String, dynamic> map) => TeacherProfile(
+        id: map['id'] as String,
+        fullName: map['full_name'] as String,
+        email: map['email'] as String,
+      );
 }
 
 class AttendanceSession {
@@ -315,12 +355,15 @@ class AttendanceRecord {
         'lecture_id': lectureId,
         'student_id': studentId,
         'status': status.name,
-        'checked_in_at': checkedInAt?.toIso8601String(),
+        // Supabase stores TIMESTAMPTZ columns. A local ISO string without an
+        // offset is read in the server's timezone (UTC), which silently shifted
+        // check-in evidence by the device's UTC offset. Send explicit UTC.
+        'checked_in_at': checkedInAt?.toUtc().toIso8601String(),
         'biometric_verified': biometricVerified,
         'biometric_method': biometricMethod,
         'override_reason': overrideReason,
         'override_by': overrideBy,
-        'device_recorded_at': deviceRecordedAt.toIso8601String(),
+        'device_recorded_at': deviceRecordedAt.toUtc().toIso8601String(),
       };
 }
 

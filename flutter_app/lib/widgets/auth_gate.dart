@@ -9,6 +9,8 @@ import '../screens/student_attendance_screen.dart';
 import '../screens/student_pass_mode_screen.dart';
 import '../screens/teacher_monitor_screen.dart';
 import '../providers/lecture_guard_providers.dart';
+import '../services/auth_service.dart';
+import '../services/sync_engine_service.dart';
 
 class AuthGate extends ConsumerStatefulWidget {
   const AuthGate({super.key});
@@ -56,10 +58,18 @@ class _AuthGateState extends ConsumerState<AuthGate> {
   Future<UserRole?> _loadRoleAndSession(String userId) async {
     final notifier = ref.read(lectureSessionProvider.notifier);
     await notifier.initialization;
+    final syncEngine = ref.read(syncEngineProvider);
+    final isOffline =
+        await syncEngine.currentTransport() == NetworkTransport.offline;
     // Start-up cannot read `school_settings` (its policy requires a signed-in
     // account), so a refresh that was skipped or rejected is retried here.
-    await notifier.ensureSchoolSettingsFresh();
-    final role = await ref.read(authServiceProvider).getProfileRole(userId);
+    if (!isOffline) await notifier.ensureSchoolSettingsFresh();
+    final role = await resolveProfileRoleForStartup(
+      userId: userId,
+      authService: ref.read(authServiceProvider),
+      syncEngine: syncEngine,
+      isOffline: isOffline,
+    );
     if (role == UserRole.teacher) {
       await notifier.restoreActiveSession(userId);
     } else {
@@ -111,6 +121,31 @@ class _AuthGateState extends ConsumerState<AuthGate> {
         );
       },
     );
+  }
+}
+
+Future<UserRole?> resolveProfileRoleForStartup({
+  required String userId,
+  required AuthService authService,
+  required SyncEngineService syncEngine,
+  required bool isOffline,
+}) async {
+  if (isOffline) {
+    final role = await authService.getCachedProfileRole(userId);
+    if (role == null) {
+      throw StateError('No cached school profile is available while offline.');
+    }
+    return role;
+  }
+  try {
+    return await authService.getProfileRole(userId);
+  } catch (error) {
+    if (await syncEngine.currentTransport() != NetworkTransport.offline) {
+      rethrow;
+    }
+    final role = await authService.getCachedProfileRole(userId);
+    if (role == null) rethrow;
+    return role;
   }
 }
 

@@ -63,6 +63,35 @@ void main() {
         restored.toSupabasePayload(), containsPair('override_by', 'teacher-1'));
   });
 
+  test('attendance record payload sends timestamps in UTC', () {
+    final checkedInAt = DateTime(2026, 11, 20, 9, 15);
+    final record = AttendanceRecord(
+      id: 'record-1',
+      sessionId: 'session-1',
+      lectureId: 'lecture-1',
+      studentId: 'student-1',
+      status: AttendanceStatus.present,
+      checkedInAt: checkedInAt,
+      deviceRecordedAt: checkedInAt,
+    );
+
+    final payload = record.toSupabasePayload();
+    final sentCheckIn = payload['checked_in_at'] as String;
+    final sentDeviceTime = payload['device_recorded_at'] as String;
+
+    expect(sentCheckIn, endsWith('Z'));
+    expect(sentDeviceTime, endsWith('Z'));
+    expect(DateTime.parse(sentCheckIn).isUtc, isTrue);
+    expect(
+      DateTime.parse(sentCheckIn).isAtSameMomentAs(checkedInAt),
+      isTrue,
+    );
+    expect(
+      DateTime.parse(sentDeviceTime).isAtSameMomentAs(checkedInAt),
+      isTrue,
+    );
+  });
+
   test('school setting reads SQLite and Supabase boolean representations', () {
     expect(
       SchoolSettings.fromMap({'excused_counts_as_attended': 0})

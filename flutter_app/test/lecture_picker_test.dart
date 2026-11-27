@@ -55,6 +55,7 @@ void main() {
       databasePath: inMemoryDatabasePath,
     );
     await database.database;
+    await database.cacheLectures(_lectures);
     sync = _OfflineSyncEngine(database);
     notifier = _FakeLectureSessionNotifier(database, sync);
     await notifier.initialization;
@@ -100,13 +101,13 @@ void main() {
     expect(find.text('CHM-102 · Organic Chemistry'), findsOneWidget);
 
     await tester.tap(find.text('BIO-101 · Cell Biology'));
-    await tester.pumpAndSettle();
+    await _pumpUntilFound(tester, find.text('1 students cached'));
 
     expect(find.text('1 students cached'), findsOneWidget);
     expect(notifier.rosterLecture, 'lecture-1');
 
     await tester.tap(find.text('Use this lecture'));
-    await tester.pumpAndSettle();
+    await _pumpUntilFound(tester, find.text('Open picker'));
 
     expect(find.text('Open picker'), findsOneWidget);
     expect(notifier.selectedLecture?.id, 'lecture-1');
@@ -128,13 +129,49 @@ void main() {
 
     expect(find.text('BIO-101 · Cell Biology'), findsOneWidget);
   });
+
+  testWidgets('empty assignments explain admin setup and can be refreshed',
+      (tester) async {
+    notifier.lectures = const [];
+    await openPicker(tester);
+
+    expect(
+      find.textContaining('No courses have been assigned to your account'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Contact an admin'), findsOneWidget);
+    expect(find.text('Refresh / sync courses'), findsOneWidget);
+
+    notifier.lectures = _lectures;
+    await tester.tap(find.text('Refresh / sync courses'));
+    await tester.pumpAndSettle();
+    expect(find.text('BIO-101 · Cell Biology'), findsOneWidget);
+  });
+}
+
+Future<void> _pumpUntilFound(WidgetTester tester, Finder finder) async {
+  for (var attempt = 0; attempt < 30; attempt++) {
+    if (finder.evaluate().isNotEmpty) return;
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+  }
 }
 
 class _FakeLectureSessionNotifier extends LectureSessionNotifier {
-  _FakeLectureSessionNotifier(LocalDatabaseService database, SyncEngineService sync)
-      : super(database, BiometricService(), sync);
+  _FakeLectureSessionNotifier(
+    LocalDatabaseService database,
+    SyncEngineService sync,
+  ) : super(
+          database,
+          BiometricService(),
+          sync,
+          currentUserId: () => 'teacher-1',
+        );
 
   bool failLectures = false;
+  List<Lecture> lectures = _lectures;
   Lecture? selectedLecture;
   String? rosterLecture;
 
@@ -146,7 +183,7 @@ class _FakeLectureSessionNotifier extends LectureSessionNotifier {
     if (failLectures) {
       throw StateError('offline and nothing cached');
     }
-    state = state.copyWith(availableLectures: _lectures);
+    state = state.copyWith(availableLectures: lectures);
   }
 
   @override
@@ -156,9 +193,9 @@ class _FakeLectureSessionNotifier extends LectureSessionNotifier {
   }
 
   @override
-  void selectLecture(Lecture lecture, List<Student> students) {
+  Future<void> selectLecture(Lecture lecture, List<Student> students) async {
     selectedLecture = lecture;
-    super.selectLecture(lecture, students);
+    await super.selectLecture(lecture, students);
   }
 }
 

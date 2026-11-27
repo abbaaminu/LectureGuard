@@ -1,6 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:lecture_guard/models/attendance_models.dart';
 import 'package:lecture_guard/providers/lecture_guard_providers.dart';
 import 'package:lecture_guard/screens/admin_analytics_screen.dart';
@@ -84,6 +88,45 @@ void main() {
     notifier.reportSchoolSettingsError(StateError('permission denied'));
 
     expect(notifier.state.schoolSettingsError, contains('permission denied'));
+  });
+
+  test('profile role lookups are cached for the same signed-in user', () async {
+    final client = SupabaseClient(
+      'https://lectureguard.test',
+      'test-key',
+      authOptions: const AuthClientOptions(autoRefreshToken: false),
+      httpClient: MockClient((request) async => http.Response(
+            jsonEncode([
+              {'role': 'teacher'},
+            ]),
+            200,
+            headers: {
+              'content-type': 'application/json; charset=utf-8',
+              'content-range': '0-0/1',
+            },
+            request: request,
+          )),
+    );
+    final auth = AuthService(client: client, database: database);
+    addTearDown(client.dispose);
+
+    expect(await auth.getProfileRole('teacher-1'), UserRole.teacher);
+    expect(await auth.getCachedProfileRole('teacher-1'), UserRole.teacher);
+    expect(await auth.getCachedProfileRole('another-user'), isNull);
+  });
+
+  test('startup role resolution uses the cached role when offline', () async {
+    await database.cacheUserProfileRole('teacher-1', UserRole.teacher.name);
+    final auth = _OfflineCachedAuthService(database);
+    final role = await resolveProfileRoleForStartup(
+      userId: 'teacher-1',
+      authService: auth,
+      syncEngine: sync,
+      isOffline: true,
+    );
+
+    expect(role, UserRole.teacher);
+    expect(auth.remoteRoleLookups, 0);
   });
 
   test('a teacher with a locked Pass Mode session is routed to Pass Mode', () {
@@ -177,12 +220,12 @@ void main() {
 class _RecordingAuthService extends AuthService {
   _RecordingAuthService({this.error})
       : super(
-        client: SupabaseClient(
-          'https://lectureguard.test',
-          'test-key',
-          authOptions: const AuthClientOptions(autoRefreshToken: false),
-        ),
-      );
+          client: SupabaseClient(
+            'https://lectureguard.test',
+            'test-key',
+            authOptions: const AuthClientOptions(autoRefreshToken: false),
+          ),
+        );
 
   final Object? error;
   int signInCalls = 0;
@@ -207,18 +250,41 @@ class _RecordingAuthService extends AuthService {
 class _SignedOutAuthService extends AuthService {
   _SignedOutAuthService()
       : super(
-        client: SupabaseClient(
-          'https://lectureguard.test',
-          'test-key',
-          authOptions: const AuthClientOptions(autoRefreshToken: false),
-        ),
-      );
+          client: SupabaseClient(
+            'https://lectureguard.test',
+            'test-key',
+            authOptions: const AuthClientOptions(autoRefreshToken: false),
+          ),
+        );
 
   @override
   Session? get currentSession => null;
 
   @override
   Stream<AuthState> get authStateChanges => const Stream.empty();
+
+  @override
+  Future<void> signOut() async {}
+}
+
+class _OfflineCachedAuthService extends AuthService {
+  _OfflineCachedAuthService(LocalDatabaseService database)
+      : super(
+          client: SupabaseClient(
+            'https://lectureguard.test',
+            'test-key',
+            authOptions: const AuthClientOptions(autoRefreshToken: false),
+          ),
+          database: database,
+        );
+
+  var remoteRoleLookups = 0;
+
+  @override
+  Future<UserRole?> getProfileRole(String userId) async {
+    remoteRoleLookups++;
+    throw StateError('The network should not be used while offline.');
+  }
 
   @override
   Future<void> signOut() async {}

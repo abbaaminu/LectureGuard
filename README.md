@@ -51,6 +51,9 @@ Apply these SQL files in order using the Supabase CLI or SQL editor:
    filters rows but does not grant access, so every anon-key request used to
    fail with `permission denied for table ...`), backfills missing profiles,
    and provisions a profile/role for each new auth user.
+7. `supabase/migrations/007_teacher_update_own_lecture_schedule.sql` — lets
+   teachers update timetable fields on their assigned lectures while keeping
+   course identity and teacher assignment administrator-owned.
 
 ### Accounts, profiles and roles
 
@@ -73,8 +76,18 @@ To provision or change a role, use one of these — never edit
   `select public.backfill_profiles_from_auth_users();` — it returns how many
   profiles it inserted.
 
-Both helpers are revoked from `anon`, so the publishable key cannot change
-roles. The client uses only the anon/publishable key; RLS enforces access.
+Role changes are applied by the server immediately, but a user who is already
+signed in keeps the cached role until they sign out and back in (or restart the
+app). Both role helpers are revoked from `anon`, so the publishable key cannot
+change roles. The client uses only the anon/publishable key; RLS enforces
+access.
+
+Student accounts can sign in to a read-only **My Attendance** screen, but only
+after an administrator links the auth profile to a student row: Admin →
+Students → the account icon → choose the student-role profile. The link is
+stored in `students.profile_id` (unique). Student accounts cannot check
+themselves in; Pass Mode remains a shared invigilator tablet, and an account
+without a link sees an instruction to contact an administrator.
 
 ## Attendance and biometric limitations
 
@@ -96,13 +109,13 @@ cannot enable Guided Access programmatically.
 Pass Mode records attendance against a student row, but the app has to be told
 *which* student is standing at the tablet. The table lists the options that are
 realistically available to a school; only teacher attestation is implemented
-today.
+for Pass Mode check-in today.
 
 | Option | How it would work | What it proves | Status in LectureGuard |
 | --- | --- | --- | --- |
 | Per-student QR / NFC card | The student presents their own card; the camera (QR) or NFC reader resolves the card token to a student id. | Possession of the card. | Not implemented. No scanner or NFC dependency is shipped. |
 | Student-entered PIN bound to the student id | After the roster tap, the student types a short PIN that is bound to their student id (`students.id`). | Knowledge of a secret tied to one student. | Not implemented. The PIN in the app is the lecturer/admin exit and override PIN (`PinSecurityService`), never a student credential. |
-| One device per student (BYOD) | Each student signs in on their own phone and checks themselves in; the session is scoped to their account. | Account possession. | Not implemented. Pass Mode is a shared invigilator tablet; only staff accounts sign in. |
+| One device per student (BYOD) | Each student signs in on their own phone and checks themselves in; the session is scoped to their account. | Account possession. | Partially implemented. An admin-linked student account can sign in to a read-only **My Attendance** history; self check-in is not implemented. Pass Mode remains a shared invigilator tablet. |
 | Teacher attestation | The invigilator taps the student on the roster and confirms the check-in. | The invigilator's judgement, recorded as `override_by` + `override_reason`. | **Implemented.** The tap is gated by the device biometric; when biometrics are unavailable the lecturer PIN authorises an override and the reason is stored on the record. |
 | Per-student face enrolment | Each student's face is enrolled once, then matched at check-in. | Biometric identity of that student. | Not implemented. `local_auth` only verifies a fingerprint/Face ID enrolled on the shared device, which the limitation above explains is not student identity. |
 

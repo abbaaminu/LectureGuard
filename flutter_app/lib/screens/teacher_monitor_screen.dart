@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/attendance_models.dart';
@@ -6,6 +8,7 @@ import 'change_lecturer_pin_screen.dart';
 import '../services/sync_engine_service.dart';
 import '../widgets/teacher_override_dialog.dart';
 import 'class_history_screen.dart';
+import 'edit_lecture_timetable_dialog.dart';
 import 'lecture_picker_screen.dart';
 
 class TeacherMonitorScreen extends ConsumerStatefulWidget {
@@ -19,7 +22,10 @@ class TeacherMonitorScreen extends ConsumerStatefulWidget {
 class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
   bool _loadingLectures = true;
   bool _startingSession = false;
+  bool _checkingValidation = true;
   String? _loadError;
+  String? _startValidationMessage;
+  String? _launchValidationMessage;
 
   @override
   void initState() {
@@ -35,12 +41,14 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
         _loadingLectures = false;
         _loadError = null;
       });
+      await _refreshLocalValidation();
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _loadingLectures = false;
         _loadError = 'Could not load assigned classes: $error';
       });
+      await _refreshLocalValidation();
     }
   }
 
@@ -48,20 +56,91 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const LecturePickerScreen()),
     );
+    await _refreshLocalValidation();
+  }
+
+  Future<void> _refreshLocalValidation() async {
+    final notifier = ref.read(lectureSessionProvider.notifier);
+    if (mounted) setState(() => _checkingValidation = true);
+    String? startMessage;
+    String? launchMessage;
+    try {
+      startMessage = await notifier.validateStartSessionLocally();
+      launchMessage = await notifier.validatePassModeLaunchLocally();
+    } catch (error) {
+      startMessage = 'Could not validate this course locally: $error';
+      launchMessage = startMessage;
+    }
+    if (!mounted) return;
+    setState(() {
+      _startValidationMessage = startMessage;
+      _launchValidationMessage = launchMessage;
+      _checkingValidation = false;
+    });
+  }
+
+  bool _validationRelevantStateChanged(
+      SessionState? previous, SessionState next) {
+    if (previous == null) return true;
+    return previous.activeLecture != next.activeLecture ||
+        previous.activeSession != next.activeSession ||
+        previous.roster.length != next.roster.length;
+  }
+
+  Future<void> _editTimetable(Lecture lecture) async {
+    final update = await showDialog<LectureTimetableUpdate>(
+      context: context,
+      builder: (_) => EditLectureTimetableDialog(lecture: lecture),
+    );
+    if (update == null) return;
+    try {
+      await ref
+          .read(lectureSessionProvider.notifier)
+          .updateTeacherLectureTimetable(
+            lecture: lecture,
+            roomNumber: update.roomNumber,
+            periodNumber: update.periodNumber,
+            academicTerm: update.academicTerm,
+            lateGraceMinutes: update.lateGraceMinutes,
+          );
+      await _refreshLocalValidation();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Timetable updated.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update timetable: $error')),
+        );
+      }
+    }
   }
 
   Future<void> _startSession() async {
     final state = ref.read(lectureSessionProvider);
     final lecture = state.activeLecture;
-    if (lecture == null || state.roster.isEmpty) return;
+    final notifier = ref.read(lectureSessionProvider.notifier);
+    final validationMessage = await notifier.validateStartSessionLocally();
+    if (validationMessage != null) {
+      if (mounted) {
+        setState(() => _startValidationMessage = validationMessage);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(validationMessage)),
+        );
+      }
+      return;
+    }
+    if (lecture == null) return;
     setState(() => _startingSession = true);
     try {
-      final notifier = ref.read(lectureSessionProvider.notifier);
       await notifier.startPassModeSession(
         lecture: lecture,
         students: state.roster,
       );
       if (mounted) {
+        unawaited(_refreshLocalValidation());
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
               content: Text('Session ready. Launch Pass Mode when ready.')),
@@ -80,9 +159,21 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
 
   Future<void> _launchPassMode() async {
     try {
-      await ref.read(lectureSessionProvider.notifier).lockPassMode();
+      final notifier = ref.read(lectureSessionProvider.notifier);
+      final validationMessage = await notifier.validatePassModeLaunchLocally();
+      if (validationMessage != null) {
+        if (mounted) {
+          setState(() => _launchValidationMessage = validationMessage);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(validationMessage)),
+          );
+        }
+        return;
+      }
+      await notifier.lockPassMode();
     } catch (error) {
       if (mounted) {
+        unawaited(_refreshLocalValidation());
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not launch Pass Mode: $error')),
         );
@@ -143,7 +234,7 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
         studentName: student.fullName,
         initialStatus: record?.status ?? AttendanceStatus.absent,
         overridingBiometricCheckIn: record?.biometricVerified == true,
-        ),
+      ),
     );
     if (request == null) return;
     try {
@@ -178,6 +269,11 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
   Widget build(BuildContext context) {
     final ref = this.ref;
     final state = ref.watch(lectureSessionProvider);
+    ref.listen<SessionState>(lectureSessionProvider, (previous, next) {
+      if (_validationRelevantStateChanged(previous, next)) {
+        unawaited(Future<void>.microtask(_refreshLocalValidation));
+      }
+    });
     final progress = state.syncProgress;
     final session = state.activeSession;
     final hasActiveSession = session != null && session.endedAt == null;
@@ -246,9 +342,28 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
               children: [
                 if (_loadingLectures)
                   const LinearProgressIndicator()
-                else if (_loadError != null && state.availableLectures.isEmpty)
-                  Text(
-                    _loadError!,
+                else if (state.availableLectures.isEmpty &&
+                    state.activeLecture == null)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (_loadError != null)
+                        Text(
+                          _loadError!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      const Text(
+                        'No courses have been assigned to your account by an admin yet. Contact an admin to get courses assigned.',
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _loadingLectures ? null : _loadLectures,
+                        icon: const Icon(Icons.sync),
+                        label: const Text('Refresh / sync courses'),
+                      ),
+                    ],
                   )
                 else
                   Column(
@@ -282,10 +397,19 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
                           label: const Text('Class history (offline)'),
                         ),
                       if (state.activeLecture != null)
+                        OutlinedButton.icon(
+                          onPressed: hasActiveSession
+                              ? null
+                              : () => _editTimetable(state.activeLecture!),
+                          icon: const Icon(Icons.edit_calendar_outlined),
+                          label: const Text('Update timetable'),
+                        ),
+                      if (state.activeLecture != null)
                         Text(
                           '${state.enrolledCount} students · '
                           'Period ${state.activeLecture!.periodNumber} · '
-                          'Room ${state.activeLecture!.roomNumber}',
+                          'Room ${state.activeLecture!.roomNumber} · '
+                          '${state.activeLecture!.academicTerm}',
                         ),
                       if (_loadError != null)
                         Text(
@@ -303,6 +427,26 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
                                 : 'Session ended · ${session.sessionDate}',
                           ),
                         ),
+                      if (_startValidationMessage != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(
+                            _startValidationMessage!,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ),
+                      if (_launchValidationMessage != null && hasActiveSession)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(
+                            _launchValidationMessage!,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 12),
                       Wrap(
                         spacing: 8,
@@ -310,8 +454,8 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
                         children: [
                           FilledButton(
                             onPressed: _startingSession ||
-                                    state.activeLecture == null ||
-                                    state.roster.isEmpty ||
+                                    _checkingValidation ||
+                                    _startValidationMessage != null ||
                                     hasActiveSession
                                 ? null
                                 : _startSession,
@@ -326,8 +470,11 @@ class _TeacherMonitorScreenState extends ConsumerState<TeacherMonitorScreen> {
                                 : const Text('Start Session'),
                           ),
                           FilledButton.tonalIcon(
-                            onPressed:
-                                hasActiveSession ? _launchPassMode : null,
+                            onPressed: hasActiveSession &&
+                                    !_checkingValidation &&
+                                    _launchValidationMessage == null
+                                ? _launchPassMode
+                                : null,
                             icon: const Icon(Icons.phonelink_lock),
                             label: const Text('Launch Pass Mode'),
                           ),

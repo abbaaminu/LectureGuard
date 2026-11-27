@@ -48,6 +48,14 @@ void main() {
         'enrolled_snapshot_count': 30,
       };
 
+  Map<String, dynamic> attendanceRow(int index) => {
+        'id': 'record-$index',
+        'session_id': 'session-$index',
+        'lecture_id': 'lecture-$index',
+        'student_id': 'student-$index',
+        'status': 'present',
+      };
+
   SupabaseClient buildClient() => SupabaseClient(
         'https://lectureguard.test',
         'test-key',
@@ -67,6 +75,15 @@ void main() {
               request,
             );
           }
+          if (request.url.path.endsWith('/attendance_records')) {
+            final offset =
+                int.tryParse(request.url.queryParameters['offset'] ?? '') ?? 0;
+            final count = offset == 0 ? 50 : 1;
+            return _json(
+              List.generate(count, (index) => attendanceRow(offset + index)),
+              request,
+            );
+          }
           return _json(const [], request);
         }),
       );
@@ -77,7 +94,6 @@ void main() {
         ],
         child: MaterialApp(home: AdminAnalyticsScreen(client: client)),
       );
-
 
   test('the logs stub decodes to a full page', () async {
     final client = buildClient();
@@ -151,7 +167,8 @@ void main() {
     printOnFailure('search: ${_texts(tester)}');
 
     final chronicCalls = calls
-        .where((call) => call.url.path.endsWith('/rpc/admin_chronic_absentee_page'))
+        .where((call) =>
+            call.url.path.endsWith('/rpc/admin_chronic_absentee_page'))
         .toList();
     expect(chronicCalls.length, greaterThanOrEqualTo(2));
     expect(chronicCalls.last.params['p_search'], 'STU-1');
@@ -165,6 +182,63 @@ void main() {
 
     printOnFailure('empty: ${_texts(tester)}');
     expect(find.text('No students match these filters.'), findsOneWidget);
+  });
+
+  testWidgets('School Management keeps existing tabs and adds admin management',
+      (tester) async {
+    await tester.pumpWidget(wrap(buildClient()));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    final tabBar = tester.widget<TabBar>(find.byType(TabBar));
+    expect(tabBar.tabs, hasLength(6));
+    expect(find.text('Courses & Lecturers'), findsOneWidget);
+    expect(find.text('Admin Management'), findsOneWidget);
+    expect(find.text('School Records'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Admin Management'));
+    await tester.pump();
+    await tester.tap(find.text('Admin Management'));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(
+      find.textContaining('Create new accounts in Supabase Auth first.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('School Records loads attendance rows in pages', (tester) async {
+    final client = buildClient();
+    await tester.pumpWidget(wrap(client));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    await tester.ensureVisible(find.text('School Records'));
+    await tester.pump();
+    await tester.tap(find.text('School Records'));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    expect(find.text('present · student student-0'), findsOneWidget);
+    final schoolRecordsList = find.byType(ListView).last;
+    for (var i = 0; i < 6; i++) {
+      await tester.drag(schoolRecordsList, const Offset(0, -1000));
+      await tester.pump();
+    }
+    expect(find.text('Load more rows'), findsOneWidget);
+    await tester.tap(find.text('Load more rows'));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    final attendanceCalls = calls
+        .where((call) => call.url.path.endsWith('/attendance_records'))
+        .toList();
+    expect(attendanceCalls, hasLength(2));
+    expect(attendanceCalls.last.url.queryParameters['offset'], '50');
+    expect(find.text('present · student student-50'), findsOneWidget);
+    expect(find.text('Load more rows'), findsNothing);
   });
 }
 

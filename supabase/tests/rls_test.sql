@@ -49,6 +49,7 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
 \ir ../migrations/004_harden_teacher_submission_logs.sql
 \ir ../migrations/005_school_settings_left_join.sql
 \ir ../migrations/006_grants_and_role_provisioning.sql
+\ir ../migrations/007_teacher_update_own_lecture_schedule.sql
 
 DO $$
 BEGIN
@@ -438,6 +439,73 @@ BEGIN
     RAISE EXCEPTION 'teacher changed a school-wide admin setting';
   END IF;
 
+  UPDATE public.lectures
+  SET room_number = 'A2',
+      period_number = 3,
+      academic_term = '2026-T2',
+      late_grace_minutes = 12
+  WHERE id = '20000000-0000-0000-0000-000000000001';
+  IF NOT EXISTS (
+    SELECT 1 FROM public.lectures
+    WHERE id = '20000000-0000-0000-0000-000000000001'
+      AND teacher_id = auth.uid()
+      AND room_number = 'A2'
+      AND period_number = 3
+      AND academic_term = '2026-T2'
+      AND late_grace_minutes = 12
+  ) THEN
+    RAISE EXCEPTION 'teacher could not update timetable fields on own lecture';
+  END IF;
+
+  UPDATE public.lectures
+  SET room_number = 'SHOULD NOT CHANGE'
+  WHERE id = '20000000-0000-0000-0000-000000000002';
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+  IF updated_count <> 0 THEN
+    RAISE EXCEPTION 'teacher updated another teacher''s lecture';
+  END IF;
+
+  BEGIN
+    UPDATE public.lectures
+    SET teacher_id = '00000000-0000-0000-0000-000000000003'
+    WHERE id = '20000000-0000-0000-0000-000000000001';
+    RAISE EXCEPTION 'teacher reassigned their own lecture';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    UPDATE public.lectures
+    SET course_code = 'HACKED'
+    WHERE id = '20000000-0000-0000-0000-000000000001';
+    RAISE EXCEPTION 'teacher edited admin-owned course identity';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    UPDATE public.lectures
+    SET title = 'HACKED'
+    WHERE id = '20000000-0000-0000-0000-000000000001';
+    RAISE EXCEPTION 'teacher edited admin-owned course title';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.lectures (
+      id, course_code, title, teacher_id, room_number, period_number, academic_term
+    )
+    VALUES (
+      '20000000-0000-0000-0000-000000000004',
+      'PHYS-1',
+      'Physics',
+      auth.uid(),
+      'TBD',
+      1,
+      '2026-T2'
+    );
+    RAISE EXCEPTION 'teacher created a lecture assignment';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
   -- A teacher may record attendance for their own session. Session 3 has no
   -- record for this student yet, so this is an insert (session 4 already holds
   -- the 'excused' fixture row and is protected by a unique constraint).
@@ -506,6 +574,39 @@ BEGIN
      OR (SELECT count(*) FROM public.v_student_attendance_summary) <> 2
      OR (SELECT count(*) FROM public.teacher_submission_logs(1000, 0)) <> 6 THEN
     RAISE EXCEPTION 'admin cannot see school-wide data';
+  END IF;
+
+  UPDATE public.lectures
+  SET teacher_id = '00000000-0000-0000-0000-000000000003'
+  WHERE id = '20000000-0000-0000-0000-000000000001';
+  IF NOT EXISTS (
+    SELECT 1 FROM public.lectures
+    WHERE id = '20000000-0000-0000-0000-000000000001'
+      AND teacher_id = '00000000-0000-0000-0000-000000000003'
+  ) THEN
+    RAISE EXCEPTION 'admin could not assign a course to another teacher';
+  END IF;
+
+  INSERT INTO public.lectures (
+    id, course_code, title, teacher_id, room_number, period_number, academic_term
+  )
+  VALUES (
+    '20000000-0000-0000-0000-000000000003',
+    'CHEM-1',
+    'Chemistry',
+    '00000000-0000-0000-0000-000000000002',
+    'TBD',
+    1,
+    '2026-T2'
+  );
+  IF NOT EXISTS (
+    SELECT 1 FROM public.lectures
+    WHERE id = '20000000-0000-0000-0000-000000000003'
+      AND course_code = 'CHEM-1'
+      AND title = 'Chemistry'
+      AND teacher_id = '00000000-0000-0000-0000-000000000002'
+  ) THEN
+    RAISE EXCEPTION 'admin could not create and assign a course';
   END IF;
 
   INSERT INTO public.profiles (id, full_name, email, role)

@@ -11,12 +11,20 @@ import '../services/pin_security_service.dart';
 import '../services/session_ids.dart';
 import '../services/sync_engine_service.dart';
 
+String? _signedInUserId() {
+  try {
+    return Supabase.instance.client.auth.currentUser?.id;
+  } catch (_) {
+    return null;
+  }
+}
+
 final localDatabaseProvider = Provider<LocalDatabaseService>((ref) {
   return LocalDatabaseService();
 });
 
 final authServiceProvider = Provider<AuthService>((ref) {
-  return AuthService();
+  return AuthService(database: ref.watch(localDatabaseProvider));
 });
 
 final biometricServiceProvider = Provider<BiometricService>((ref) {
@@ -74,8 +82,7 @@ class SessionState {
     final attended = recordsByStudentId.values.where((record) =>
         record.status == AttendanceStatus.present ||
         record.status == AttendanceStatus.late ||
-        (excusedCountsAsAttended &&
-            record.status == AttendanceStatus.excused));
+        (excusedCountsAsAttended && record.status == AttendanceStatus.excused));
     return (enrolledCount - attended.length).clamp(0, enrolledCount);
   }
 
@@ -127,13 +134,19 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   final LocalDatabaseService _db;
   final BiometricService _biometrics;
   final SyncEngineService _syncEngine;
+  final String? Function() _currentUserId;
   final _uuid = const Uuid();
   late final Future<void> initialization;
   bool _disposed = false;
   bool _schoolSettingsLoadedFromNetwork = false;
 
-  LectureSessionNotifier(this._db, this._biometrics, this._syncEngine)
-      : super(const SessionState()) {
+  LectureSessionNotifier(
+    this._db,
+    this._biometrics,
+    this._syncEngine, {
+    String? Function()? currentUserId,
+  })  : _currentUserId = currentUserId ?? _signedInUserId,
+        super(const SessionState()) {
     initialization = _initialize();
   }
 
@@ -248,7 +261,7 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
   }
 
   Future<void> updateExcusedCountsAsAttended(bool value) async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = _currentUserId();
     if (userId == null) {
       throw StateError('Sign in before changing school settings.');
     }
@@ -275,35 +288,592 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     }
   }
 
+  Future<List<TeacherProfile>> loadTeacherProfiles({
+    SupabaseClient? client,
+  }) async {
+    final rows = await (client ?? Supabase.instance.client)
+        .from('profiles')
+        .select('id, full_name, email')
+        .eq('role', 'teacher')
+        .order('full_name');
+    return rows.map((row) => TeacherProfile.fromMap(row)).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> loadAdminProfiles({
+    SupabaseClient? client,
+  }) async {
+    final supabase = client ?? Supabase.instance.client;
+    const pageSize = 500;
+    final profiles = <Map<String, dynamic>>[];
+    var offset = 0;
+    while (true) {
+      final rows = await supabase
+          .from('profiles')
+          .select('id, full_name, email, role')
+          .order('full_name')
+          .range(offset, offset + pageSize - 1);
+      profiles.addAll(rows.map((row) => Map<String, dynamic>.from(row)));
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+    await _db.cacheAdminProfiles(profiles);
+    return profiles;
+  }
+
+  Future<void> setAdminProfileRole({
+    required String profileId,
+    required String email,
+    required UserRole role,
+    SupabaseClient? client,
+  }) async {
+    final result = await (client ?? Supabase.instance.client).rpc(
+      'admin_set_user_role',
+      params: {'p_email': email, 'p_role': role.name},
+    );
+    if (result == null || result.toString() != profileId) {
+      throw StateError('The role update did not return the expected profile.');
+    }
+
+    final cachedProfiles = await _db.getCachedAdminProfiles();
+    final profiles = cachedProfiles
+        .map((profile) => Map<String, dynamic>.from(profile))
+        .toList();
+    final index = profiles.indexWhere((profile) => profile['id'] == profileId);
+    if (index >= 0) {
+      profiles[index]['role'] = role.name;
+      await _db.cacheAdminProfiles(profiles);
+    }
+    await _db.cacheUserProfileRole(profileId, role.name);
+  }
+
+  Future<List<Map<String, dynamic>>> loadAdminStudents({
+    SupabaseClient? client,
+  }) async {
+    final supabase = client ?? Supabase.instance.client;
+    const pageSize = 500;
+    final students = <Map<String, dynamic>>[];
+    var offset = 0;
+    while (true) {
+      final rows = await supabase
+          .from('students')
+          .select(
+              'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
+          .order('last_name')
+          .order('first_name')
+          .range(offset, offset + pageSize - 1);
+      students.addAll(rows.map((row) => Map<String, dynamic>.from(row)));
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+    await _db.cacheAdminStudents(students);
+    return students;
+  }
+
+  Future<Map<String, dynamic>> createAdminStudent({
+    required String studentCode,
+    required String firstName,
+    required String lastName,
+    required int gradeLevel,
+    required String homeroom,
+    SupabaseClient? client,
+  }) async {
+    final values = _validatedAdminStudentValues(
+      studentCode: studentCode,
+      firstName: firstName,
+      lastName: lastName,
+      gradeLevel: gradeLevel,
+      homeroom: homeroom,
+      active: true,
+    );
+    final row = await (client ?? Supabase.instance.client)
+        .from('students')
+        .insert(values)
+        .select(
+            'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
+        .single();
+    final student = Map<String, dynamic>.from(row);
+    await _db.cacheAdminStudent(student);
+    return student;
+  }
+
+  Future<Map<String, dynamic>> updateAdminStudent({
+    required String studentId,
+    required String studentCode,
+    required String firstName,
+    required String lastName,
+    required int gradeLevel,
+    required String homeroom,
+    required bool active,
+    SupabaseClient? client,
+  }) async {
+    final values = _validatedAdminStudentValues(
+      studentCode: studentCode,
+      firstName: firstName,
+      lastName: lastName,
+      gradeLevel: gradeLevel,
+      homeroom: homeroom,
+      active: active,
+    );
+    final row = await (client ?? Supabase.instance.client)
+        .from('students')
+        .update(values)
+        .eq('id', studentId)
+        .select(
+            'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
+        .single();
+    final student = Map<String, dynamic>.from(row);
+    await _db.cacheAdminStudent(student);
+    return student;
+  }
+
+  /// Links a student record to the Supabase auth profile used by the student
+  /// self-service screen. Passing null unlinks the account.
+  Future<Map<String, dynamic>> setAdminStudentProfile({
+    required String studentId,
+    String? profileId,
+    SupabaseClient? client,
+  }) async {
+    final normalizedProfileId = profileId?.trim();
+    final row = await (client ?? Supabase.instance.client)
+        .from('students')
+        .update({
+          'profile_id':
+              normalizedProfileId == null || normalizedProfileId.isEmpty
+                  ? null
+                  : normalizedProfileId,
+        })
+        .eq('id', studentId)
+        .select(
+            'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
+        .single();
+    final student = Map<String, dynamic>.from(row);
+    await _db.cacheAdminStudent(student);
+    return student;
+  }
+
+  Map<String, dynamic> _validatedAdminStudentValues({
+    required String studentCode,
+    required String firstName,
+    required String lastName,
+    required int gradeLevel,
+    required String homeroom,
+    required bool active,
+  }) {
+    final normalizedCode = studentCode.trim();
+    final normalizedFirstName = firstName.trim();
+    final normalizedLastName = lastName.trim();
+    final normalizedHomeroom = homeroom.trim();
+    if (normalizedCode.isEmpty ||
+        normalizedFirstName.isEmpty ||
+        normalizedLastName.isEmpty ||
+        normalizedHomeroom.isEmpty) {
+      throw ArgumentError('Student code, names, and homeroom are required.');
+    }
+    if (gradeLevel < 9 || gradeLevel > 12) {
+      throw ArgumentError('Grade level must be between 9 and 12.');
+    }
+    return {
+      'student_code': normalizedCode,
+      'first_name': normalizedFirstName,
+      'last_name': normalizedLastName,
+      'grade_level': gradeLevel,
+      'homeroom': normalizedHomeroom,
+      'active': active,
+    };
+  }
+
+  Future<List<Map<String, dynamic>>> loadAdminEnrollments({
+    required String lectureId,
+    SupabaseClient? client,
+  }) async {
+    final supabase = client ?? Supabase.instance.client;
+    const pageSize = 500;
+    final enrollments = <Map<String, dynamic>>[];
+    var offset = 0;
+    while (true) {
+      final rows = await supabase
+          .from('enrollments')
+          .select('lecture_id, student_id, active')
+          .eq('lecture_id', lectureId)
+          .range(offset, offset + pageSize - 1);
+      enrollments.addAll(rows.map((row) => Map<String, dynamic>.from(row)));
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+    await _db.cacheAdminEnrollments(lectureId, enrollments);
+    return enrollments;
+  }
+
+  Future<void> setAdminEnrollment({
+    required String lectureId,
+    required String studentId,
+    required bool active,
+    SupabaseClient? client,
+  }) async {
+    final supabase = client ?? Supabase.instance.client;
+    if (active) {
+      final cachedStudents = await _db.getCachedAdminStudents();
+      final hasActiveCachedStudent = cachedStudents.any(
+        (student) =>
+            student['id'] == studentId &&
+            (student['active'] == true || student['active'] == 1),
+      );
+      if (!hasActiveCachedStudent) {
+        throw StateError(
+          'Refresh students before enrolling; only active students can be enrolled.',
+        );
+      }
+      await supabase
+          .from('enrollments')
+          .upsert(
+            {
+              'lecture_id': lectureId,
+              'student_id': studentId,
+              'active': true,
+            },
+            onConflict: 'lecture_id,student_id',
+          )
+          .select('lecture_id, student_id, active')
+          .single();
+    } else {
+      await supabase
+          .from('enrollments')
+          .update({'active': false})
+          .eq('lecture_id', lectureId)
+          .eq('student_id', studentId)
+          .select('lecture_id')
+          .maybeSingle();
+    }
+    await _db.cacheAdminEnrollment(
+      lectureId: lectureId,
+      studentId: studentId,
+      active: active,
+    );
+  }
+
+  Future<List<Lecture>> loadAllLectures({SupabaseClient? client}) async {
+    final rows = await (client ?? Supabase.instance.client)
+        .from('lectures')
+        .select()
+        .order('course_code')
+        .order('period_number');
+    final lectures = rows.map((row) => Lecture.fromMap(row)).toList();
+    await _db.cacheLectures(lectures);
+    return lectures;
+  }
+
+  Future<Lecture> createLectureAssignment({
+    required String courseCode,
+    required String title,
+    required String teacherId,
+    required String roomNumber,
+    required int periodNumber,
+    required String academicTerm,
+    SupabaseClient? client,
+  }) async {
+    final row = await (client ?? Supabase.instance.client)
+        .from('lectures')
+        .insert({
+          'course_code': courseCode.trim(),
+          'title': title.trim(),
+          'teacher_id': teacherId,
+          'room_number': roomNumber.trim(),
+          'period_number': periodNumber,
+          'academic_term': academicTerm.trim(),
+        })
+        .select()
+        .single();
+    final lecture = Lecture.fromMap(row);
+    await _cacheLectureAndUpdateState(lecture);
+    return lecture;
+  }
+
+  Future<Lecture> reassignLectureTeacher({
+    required String lectureId,
+    required String teacherId,
+    SupabaseClient? client,
+  }) async {
+    final row = await (client ?? Supabase.instance.client)
+        .from('lectures')
+        .update({'teacher_id': teacherId})
+        .eq('id', lectureId)
+        .select()
+        .single();
+    final lecture = Lecture.fromMap(row);
+    await _cacheLectureAndUpdateState(lecture);
+    return lecture;
+  }
+
+  Future<Lecture> updateTeacherLectureTimetable({
+    required Lecture lecture,
+    required String roomNumber,
+    required int periodNumber,
+    required String academicTerm,
+    required int lateGraceMinutes,
+  }) async {
+    final userId = _currentUserId();
+    if (userId == null) {
+      throw StateError('Sign in before updating a lecture timetable.');
+    }
+    final assignmentError = await validateLectureAssignmentLocally(lecture);
+    if (assignmentError != null) throw StateError(assignmentError);
+    if (state.activeSession?.lectureId == lecture.id &&
+        state.activeSession?.endedAt == null) {
+      throw StateError('End the active session before changing the timetable.');
+    }
+    if (_isLecturePlaceholder(roomNumber) ||
+        _isLecturePlaceholder(academicTerm)) {
+      throw ArgumentError(
+          'Enter a room and academic term to configure the timetable.');
+    }
+    if (periodNumber < 1 ||
+        periodNumber > 32767 ||
+        lateGraceMinutes < 0 ||
+        lateGraceMinutes > 32767) {
+      throw ArgumentError('Enter a valid period and late grace time.');
+    }
+
+    final updatedLecture = lecture.copyWith(
+      roomNumber: roomNumber.trim(),
+      periodNumber: periodNumber,
+      academicTerm: academicTerm.trim(),
+      lateGraceMinutes: lateGraceMinutes,
+    );
+    await _db.cachePendingLectureTimetableEdit(updatedLecture);
+    _updateLectureInState(updatedLecture);
+    if (!await _syncEngine.isOnline()) return updatedLecture;
+
+    try {
+      final row = await Supabase.instance.client
+          .from('lectures')
+          .update({
+            'room_number': updatedLecture.roomNumber,
+            'period_number': updatedLecture.periodNumber,
+            'academic_term': updatedLecture.academicTerm,
+            'late_grace_minutes': updatedLecture.lateGraceMinutes,
+          })
+          .eq('id', lecture.id)
+          .eq('teacher_id', userId)
+          .select()
+          .single();
+      final syncedLecture = Lecture.fromMap(row);
+      if (syncedLecture.teacherId != userId) {
+        throw StateError('The course is no longer assigned to your account.');
+      }
+      await _db.cacheLectures([syncedLecture]);
+      await _db.clearPendingLectureTimetableEdit(syncedLecture.id);
+      _updateLectureInState(syncedLecture);
+      return syncedLecture;
+    } catch (error) {
+      throw StateError(
+        'Timetable saved on this device, but cloud sync failed: $error',
+      );
+    }
+  }
+
+  Future<void> _cacheLectureAndUpdateState(Lecture lecture) async {
+    await _db.cacheLectures([lecture]);
+    _updateLectureInState(lecture);
+  }
+
+  void _updateLectureInState(Lecture lecture) {
+    _setState((current) {
+      final isAvailable = current.availableLectures
+          .any((availableLecture) => availableLecture.id == lecture.id);
+      return current.copyWith(
+        activeLecture: current.activeLecture?.id == lecture.id
+            ? lecture
+            : current.activeLecture,
+        availableLectures: isAvailable
+            ? current.availableLectures
+                .map((availableLecture) => availableLecture.id == lecture.id
+                    ? lecture
+                    : availableLecture)
+                .toList()
+            : current.availableLectures,
+      );
+    });
+  }
+
   Future<void> loadTeacherLectures() async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = _currentUserId();
     if (userId == null) {
       throw StateError('Sign in before loading assigned classes.');
     }
 
-    if (await _syncEngine.isOnline()) {
+    final cachedLectures = (await _db.getCachedLectures(teacherId: userId))
+        .where((lecture) => lecture.teacherId == userId)
+        .toList();
+    // Publish the cache before touching the network so a slow or failed refresh
+    // never leaves an offline-capable teacher without their assigned classes.
+    if (cachedLectures.isNotEmpty) {
+      _setState(
+        (current) => current.copyWith(availableLectures: cachedLectures),
+      );
+    }
+
+    if (!await _syncEngine.isOnline()) {
+      _setState(
+        (current) => current.copyWith(availableLectures: cachedLectures),
+      );
+      return;
+    }
+
+    // Pending timetable edits have to be uploaded before the cloud copy is
+    // fetched, otherwise a failed upload would be overwritten in the cache.
+    final syncErrors =
+        await _syncEngine.syncPendingLectureTimetableUpdates(userId);
+    if (syncErrors.isNotEmpty) throw StateError(syncErrors.join('; '));
+
+    try {
       final rows = await Supabase.instance.client
           .from('lectures')
           .select()
           .eq('teacher_id', userId)
           .order('period_number');
-      final lectures = rows.map((row) => Lecture.fromMap(row)).toList();
+      final lectures = rows
+          .map((row) => Lecture.fromMap(row))
+          .where((lecture) => lecture.teacherId == userId)
+          .toList();
       await _db.cacheLectures(lectures);
       _setState((current) => current.copyWith(availableLectures: lectures));
-    } else {
-      final lectures = await _db.getCachedLectures(teacherId: userId);
-      _setState((current) => current.copyWith(availableLectures: lectures));
+    } catch (error) {
+      if (cachedLectures.isEmpty) rethrow;
+      throw StateError(
+        'Could not refresh assigned classes; showing the cached copy: $error',
+      );
     }
   }
 
+  Future<String?> validateLectureLocally(Lecture? lecture) async {
+    final assignmentError = await validateLectureAssignmentLocally(lecture);
+    if (assignmentError != null) return assignmentError;
+    final cached = await _db.getCachedLecture(lecture!.id);
+    if (_isLecturePlaceholder(cached!.roomNumber) ||
+        cached.periodNumber < 1 ||
+        cached.periodNumber > 32767 ||
+        _isLecturePlaceholder(cached.academicTerm)) {
+      return 'Configure this course timetable on your device before starting attendance.';
+    }
+    return null;
+  }
+
+  Future<String?> validateLectureAssignmentLocally(Lecture? lecture) async {
+    if (lecture == null) return 'Choose an assigned course first.';
+    final userId = _currentUserId();
+    if (userId == null) return 'Sign in before starting attendance.';
+    if (lecture.teacherId != userId) {
+      return 'This course is not assigned to your account. Contact an admin.';
+    }
+
+    final cached = await _db.getCachedLecture(lecture.id);
+    if (cached == null) {
+      return 'This course is not available in the local cache. Refresh your courses.';
+    }
+    if (cached.teacherId != userId) {
+      return 'The cached course is assigned to another lecturer. Refresh your courses.';
+    }
+    if (cached.teacherId != lecture.teacherId ||
+        cached.courseCode != lecture.courseCode ||
+        cached.title != lecture.title ||
+        cached.roomNumber != lecture.roomNumber ||
+        cached.periodNumber != lecture.periodNumber ||
+        cached.academicTerm != lecture.academicTerm ||
+        cached.lateGraceMinutes != lecture.lateGraceMinutes) {
+      return 'This course differs from its local cached record. Refresh and select it again.';
+    }
+    if (cached.id.trim().isEmpty ||
+        cached.courseCode.trim().isEmpty ||
+        cached.title.trim().isEmpty ||
+        cached.teacherId.trim().isEmpty ||
+        cached.periodNumber < 1 ||
+        cached.periodNumber > 32767 ||
+        cached.lateGraceMinutes < 0 ||
+        cached.lateGraceMinutes > 32767) {
+      return 'This course has incomplete details. Contact an admin.';
+    }
+    return null;
+  }
+
+  bool _isLecturePlaceholder(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized.isEmpty ||
+        const {
+          'tbd',
+          'to be determined',
+          'unassigned',
+          'unknown',
+          'n/a',
+          'na',
+          '-',
+        }.contains(normalized);
+  }
+
+  Future<String?> validateStartSessionLocally() async {
+    final lecture = state.activeLecture;
+    if (lecture == null) return 'Choose an assigned course first.';
+    final lectureError = await validateLectureLocally(lecture);
+    if (lectureError != null) return lectureError;
+    if (state.roster.isEmpty) {
+      return 'This course has no cached student roster. Refresh the course roster before starting.';
+    }
+
+    final userId = _currentUserId();
+    if (userId == null) return 'Sign in before starting attendance.';
+    final today = localSessionDate(DateTime.now());
+    final sessions = await _db.getSessionsForTeacherOnDate(userId, today);
+    if (sessions.any((session) =>
+        session.endedAt == null && session.lectureId != lecture.id)) {
+      return 'Another course already has an active session today. End it before starting this course.';
+    }
+    final existingCourseSession = sessions.where(
+      (session) => session.lectureId == lecture.id,
+    );
+    if (existingCourseSession.any((session) => session.endedAt != null)) {
+      return 'Attendance for this course has already ended today.';
+    }
+    return null;
+  }
+
+  Future<String?> validatePassModeLaunchLocally() async {
+    final session = state.activeSession;
+    if (session == null || session.endedAt != null) {
+      return 'Start an attendance session before launching Pass Mode.';
+    }
+    final lecture = state.activeLecture;
+    if (lecture == null) return 'Choose an assigned course first.';
+    final lectureError = await validateLectureLocally(lecture);
+    if (lectureError != null) return lectureError;
+    final userId = _currentUserId();
+    if (userId == null) return 'Sign in before launching Pass Mode.';
+    if (session.teacherId != userId ||
+        session.lectureId != lecture.id ||
+        session.sessionDate != localSessionDate(DateTime.now())) {
+      return 'This session does not match your assigned course or today’s date. Select the assigned course and start a new session.';
+    }
+    final sessions = await _db.getSessionsForTeacherOnDate(
+      userId,
+      session.sessionDate,
+    );
+    if (sessions.any(
+      (other) => other.endedAt == null && other.id != session.id,
+    )) {
+      return 'Another course already has an active session today. End it before launching Pass Mode.';
+    }
+    return null;
+  }
+
   Future<List<Student>> loadLectureRoster(Lecture lecture) async {
+    final validationError = await validateLectureAssignmentLocally(lecture);
+    if (validationError != null) throw StateError(validationError);
     if (await _syncEngine.isOnline()) {
       final rows = await Supabase.instance.client
           .from('enrollments')
           .select(
-              'students(id, student_code, first_name, last_name, grade_level, homeroom)')
+              'students!inner(id, student_code, first_name, last_name, grade_level, homeroom, active)')
           .eq('lecture_id', lecture.id)
-          .eq('active', true);
+          .eq('active', true)
+          .eq('students.active', true);
       final students = rows
           .map((row) => row['students'])
           .whereType<Map<String, dynamic>>()
@@ -315,10 +885,12 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     return _db.getAlphabeticalRoster(lecture.id);
   }
 
-  void selectLecture(Lecture lecture, List<Student> students) {
+  Future<void> selectLecture(Lecture lecture, List<Student> students) async {
     if (state.activeSession?.endedAt == null && state.activeSession != null) {
       throw StateError('End the active session before changing classes.');
     }
+    final validationError = await validateLectureAssignmentLocally(lecture);
+    if (validationError != null) throw StateError(validationError);
     _setState((current) => current.copyWith(
           activeLecture: lecture,
           roster: students,
@@ -372,6 +944,12 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     required Lecture lecture,
     required List<Student> students,
   }) async {
+    if (state.activeLecture?.id != lecture.id) {
+      throw StateError(
+          'Choose this assigned course before starting a session.');
+    }
+    final validationError = await validateStartSessionLocally();
+    if (validationError != null) throw StateError(validationError);
     await _db.cacheLectureRoster(lecture, students);
     final alphabetical = await _db.getAlphabeticalRoster(lecture.id);
     final now = DateTime.now();
@@ -386,7 +964,10 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
       isLockedPassMode: false,
       enrolledCount: alphabetical.length,
     );
-    final session = await _db.createSessionIfAbsent(proposedSession);
+    final session = await _db.createSessionIfAbsent(
+      proposedSession,
+      rejectTeacherDateConflict: true,
+    );
     if (session.endedAt != null) {
       throw StateError('Attendance for this class has already ended today.');
     }
@@ -410,7 +991,11 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
         ));
   }
 
-  Future<void> lockPassMode() => _setPassModeLocked(true);
+  Future<void> lockPassMode() async {
+    final validationError = await validatePassModeLaunchLocally();
+    if (validationError != null) throw StateError(validationError);
+    await _setPassModeLocked(true);
+  }
 
   Future<void> unlockPassMode() => _setPassModeLocked(false);
 
@@ -460,6 +1045,13 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
         verified: false,
         method: 'none',
         errorMessage: 'No active lecture session.',
+      );
+    }
+    if (session.endedAt != null) {
+      return const BiometricVerificationResult(
+        verified: false,
+        method: 'ended',
+        errorMessage: 'This attendance session has already ended.',
       );
     }
 
@@ -529,7 +1121,8 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
         status == AttendanceStatus.absent ||
         existing?.biometricVerified == true;
     final normalizedReason = reason?.trim();
-    if (requiresReason && (normalizedReason == null || normalizedReason.isEmpty)) {
+    if (requiresReason &&
+        (normalizedReason == null || normalizedReason.isEmpty)) {
       throw ArgumentError(
         'A reason is required for excused, absent, or biometric overrides.',
       );

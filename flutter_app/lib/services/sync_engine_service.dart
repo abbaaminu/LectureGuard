@@ -55,6 +55,7 @@ class SyncEngineService {
   final Future<List<ConnectivityResult>> Function()? _connectivityCheck;
   final Future<bool> Function()? _reachabilityCheck;
   final Duration Function(int attempt) _retryDelay;
+  final String? Function()? _currentUserIdOverride;
   final HttpClient _httpClient = HttpClient()
     ..connectionTimeout = _reachabilityTimeout;
 
@@ -74,12 +75,24 @@ class SyncEngineService {
     Future<List<ConnectivityResult>> Function()? connectivityCheck,
     Future<bool> Function()? reachabilityCheck,
     Duration Function(int attempt)? retryDelay,
+    String? Function()? currentUserId,
   })  : _connectivity = connectivity ?? Connectivity(),
         _connectivityChanges = connectivityChanges,
         _connectivityCheck = connectivityCheck,
         _reachabilityCheck = reachabilityCheck,
+        _currentUserIdOverride = currentUserId,
         _retryDelay = retryDelay ??
             ((attempt) => Duration(milliseconds: 500 * attempt * attempt));
+
+  String? get _currentUserId {
+    final override = _currentUserIdOverride;
+    if (override != null) return override();
+    try {
+      return _supabase.auth.currentUser?.id;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Triggers sync over Wi-Fi, mobile data, and Ethernet.
   void startAutoSyncListener({
@@ -279,26 +292,45 @@ class SyncEngineService {
             final sessionId = update['id'] as String;
             final submittedAt = update['submitted_to_cloud_at'] as String;
             try {
-              await _supabase
+              final response = await _supabase
                   .from('attendance_sessions')
                   .update({'submitted_to_cloud_at': submittedAt})
                   .eq('id', sessionId)
+                  .select('id')
+                  .maybeSingle()
                   .timeout(const Duration(seconds: 15));
-              await _localDb.markSessionSubmissionSynced(
+              if (response == null || response['id'] != sessionId) {
+                throw StateError(
+                  'The cloud did not confirm the session submission update.',
+                );
+              }
+              final markedCount = await _localDb.markSessionSubmissionSynced(
                 sessionId,
                 submittedAt,
               );
+              if (markedCount != 1) {
+                throw StateError(
+                  'The local session submission changed before its cloud acknowledgement.',
+                );
+              }
             } catch (error) {
-              final message = error.toString();
+              final message = 'Session submission update failed: $error';
               await _localDb.markSessionsFailed([sessionId], message);
-              errors.add('Session submission update failed: $message');
+              errors.add(message);
             }
           }
         }
       }
 
+      final teacherId = _currentUserId;
+      if (teacherId != null) {
+        errors.addAll(
+          await syncPendingLectureTimetableUpdates(teacherId),
+        );
+      }
+
       final remaining = await _localDb.getPendingSyncCount();
-      final pendingWork = await _localDb.getPendingSyncWorkCount();
+      final pendingWork = await _getPendingSyncWorkCount();
       return SyncResult(
         uploadedCount: totalUploaded,
         remainingPendingCount: remaining,
@@ -374,9 +406,58 @@ class SyncEngineService {
     throw lastError ?? StateError('Failed to upsert batch chunk.');
   }
 
+  Future<List<String>> syncPendingLectureTimetableUpdates(
+    String teacherId,
+  ) async {
+    final errors = <String>[];
+    final pending = await _localDb.getPendingLectureTimetableEdits(teacherId);
+    for (final lecture in pending) {
+      if (lecture.teacherId != teacherId) continue;
+      if (await currentTransport() == NetworkTransport.offline ||
+          !await _hasReachability()) {
+        errors.add('Connection lost before lecture timetable updates.');
+        break;
+      }
+      try {
+        final response = await _supabase
+            .from('lectures')
+            .update({
+              'room_number': lecture.roomNumber,
+              'period_number': lecture.periodNumber,
+              'academic_term': lecture.academicTerm,
+              'late_grace_minutes': lecture.lateGraceMinutes,
+            })
+            .eq('id', lecture.id)
+            .eq('teacher_id', teacherId)
+            .select('id')
+            .maybeSingle()
+            .timeout(const Duration(seconds: 15));
+        if (response == null || response['id'] != lecture.id) {
+          throw StateError(
+            'The cloud did not confirm the timetable update for ${lecture.id}.',
+          );
+        }
+        await _localDb.clearPendingLectureTimetableEdit(lecture.id);
+      } catch (error) {
+        errors.add('Lecture ${lecture.id} timetable update failed: $error');
+      }
+    }
+    await _refreshPendingTimer();
+    return errors;
+  }
+
+  Future<int> _getPendingSyncWorkCount() async {
+    var pending = await _localDb.getPendingSyncWorkCount();
+    final teacherId = _currentUserId;
+    if (teacherId != null) {
+      pending += await _localDb.getPendingLectureTimetableEditCount(teacherId);
+    }
+    return pending;
+  }
+
   Future<void> _refreshPendingTimer() async {
     if (_disposed) return;
-    final pendingCount = await _localDb.getPendingSyncWorkCount();
+    final pendingCount = await _getPendingSyncWorkCount();
     if (_disposed) return;
     if (pendingCount > 0) {
       _periodicSyncTimer ??= Timer.periodic(syncInterval, (_) {

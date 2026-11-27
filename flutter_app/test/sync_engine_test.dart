@@ -42,6 +42,7 @@ void main() {
     Stream<List<ConnectivityResult>>? connectivityChanges,
     Future<List<ConnectivityResult>> Function()? connectivityCheck,
     Future<bool> Function()? reachabilityCheck,
+    String? Function()? currentUserId,
   }) {
     final engine = SyncEngineService(
       database,
@@ -55,6 +56,7 @@ void main() {
           connectivityCheck ?? () async => [ConnectivityResult.wifi],
       reachabilityCheck: reachabilityCheck ?? () async => true,
       retryDelay: (_) => Duration.zero,
+      currentUserId: currentUserId,
     );
     engines.add(engine);
     return engine;
@@ -192,14 +194,36 @@ void main() {
     var currentConnectivity = <ConnectivityResult>[];
     final firstResult = Completer<SyncResult>();
     final onlineResult = Completer<SyncResult>();
-    final client = client0((request, body) async => http.Response('', 201));
+    final client = client0((request, body) async {
+      if (request.method == 'PATCH' && request.url.path.endsWith('/lectures')) {
+        return http.Response(
+          jsonEncode({'id': 'lecture-pending'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('', 201);
+    });
     final session = session0('session-transition', enrolledCount: 1);
     await database.createSessionIfAbsent(session);
     await database.upsertAttendanceRecord(record0(session, 1));
+    await database.cachePendingLectureTimetableEdit(
+      const Lecture(
+        id: 'lecture-pending',
+        courseCode: 'BIO-1',
+        title: 'Biology',
+        teacherId: 'teacher-1',
+        teacherName: 'Teacher',
+        roomNumber: 'R2',
+        periodNumber: 2,
+        academicTerm: '2026-T2',
+      ),
+    );
     final engine = engine0(
       client,
       connectivityChanges: connectivity.stream,
       connectivityCheck: () async => currentConnectivity,
+      currentUserId: () => 'teacher-1',
     );
 
     engine.startAutoSyncListener(
@@ -218,6 +242,13 @@ void main() {
     expect(
         (await onlineResult.future.timeout(const Duration(seconds: 5))).success,
         isTrue);
+    expect(
+        await database.getPendingLectureTimetableEdits('teacher-1'), isEmpty);
+    expect(
+      client.requests.where((request) =>
+          request.method == 'PATCH' && request.url.path.endsWith('/lectures')),
+      hasLength(1),
+    );
     expect(
       client.requests
           .where((request) => request.url.path.endsWith('/attendance_records'))
@@ -273,7 +304,17 @@ void main() {
   });
 
   test('submits an ended session after all of its records sync', () async {
-    final client = client0((request, body) async => http.Response('', 201));
+    final client = client0((request, body) async {
+      if (request.method == 'PATCH' &&
+          request.url.path.endsWith('/attendance_sessions')) {
+        return http.Response(
+          jsonEncode({'id': 'session-submitted'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('', 201);
+    });
     final session = session0('session-submitted', enrolledCount: 0);
     await database.createSessionIfAbsent(session);
     await database.endSession(session.id);
@@ -295,6 +336,41 @@ void main() {
     expect(row['submitted_to_cloud_at'], isA<String>());
     expect(row['submitted_to_cloud_synced'], 1);
     expect(update.body, contains('submitted_to_cloud_at'));
+  });
+
+  test('filtered session submission update remains pending', () async {
+    final client = client0((request, body) async {
+      if (request.method == 'PATCH' &&
+          request.url.path.endsWith('/attendance_sessions')) {
+        return http.Response(
+          jsonEncode({
+            'code': 'PGRST116',
+            'details': 'The result contains 0 rows',
+            'hint': null,
+            'message': 'JSON object requested, no rows returned',
+          }),
+          406,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('', 201);
+    });
+    final session = session0('session-filtered-submission', enrolledCount: 0);
+    await database.createSessionIfAbsent(session);
+    await database.endSession(session.id);
+
+    final result = await engine0(client).syncPendingRecords();
+
+    final row = (await (await database.database).query(
+      'attendance_sessions',
+      where: 'id = ?',
+      whereArgs: [session.id],
+    ))
+        .single;
+    expect(result.success, isFalse);
+    expect(row['submitted_to_cloud_synced'], 0);
+    expect(row['last_error'], contains('Session submission update failed'));
+    expect(await database.getPendingSyncWorkCount(), greaterThan(0));
   });
 
   test('connectivity without Supabase reachability leaves rows queued',
@@ -330,9 +406,8 @@ void main() {
     expect(recordRequests, hasLength(1));
     expect(recordRequests.single.url.queryParameters['on_conflict'], 'id');
 
-    final payload =
-        (jsonDecode(recordRequests.single.body) as List<dynamic>).single
-            as Map<String, dynamic>;
+    final payload = (jsonDecode(recordRequests.single.body) as List<dynamic>)
+        .single as Map<String, dynamic>;
     expect(payload['id'], 'record-session-identity-1');
     expect(payload['student_id'], 'student-1');
   });

@@ -25,7 +25,12 @@ void main() {
     );
     await database.database;
     sync = _OfflineSyncEngine(database);
-    notifier = LectureSessionNotifier(database, BiometricService(), sync);
+    notifier = LectureSessionNotifier(
+      database,
+      BiometricService(),
+      sync,
+      currentUserId: () => 'teacher-1',
+    );
     await notifier.initialization;
 
     const lecture = Lecture(
@@ -36,6 +41,7 @@ void main() {
       teacherName: 'Teacher',
       roomNumber: 'A1',
       periodNumber: 1,
+      academicTerm: '2026-T1',
     );
     final students = List.generate(
       300,
@@ -50,6 +56,8 @@ void main() {
         homeroom: '10A',
       ),
     );
+    await database.cacheLectureRoster(lecture, students);
+    await notifier.selectLecture(lecture, students);
     await notifier.startPassModeSession(
       lecture: lecture,
       students: students,

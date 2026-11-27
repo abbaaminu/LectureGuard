@@ -143,7 +143,11 @@ class _AttendanceSummary extends StatelessWidget {
       return const Card(
         child: Padding(
           padding: EdgeInsets.all(16),
-          child: Text('Your attendance summary is not available yet.'),
+          child: Text(
+            'Your account is not linked to a student record yet, or the '
+            'record is inactive. Ask an administrator to link it under '
+            'Admin → Students.',
+          ),
         ),
       );
     }

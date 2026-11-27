@@ -22,6 +22,7 @@ void main() {
     teacherName: 'Teacher',
     roomNumber: 'A1',
     periodNumber: 1,
+    academicTerm: '2026-T1',
   );
   const studentOne = Student(
     id: 'student-1',
@@ -87,6 +88,7 @@ void main() {
       database,
       BiometricService(),
       sync,
+      currentUserId: () => lecture.teacherId,
     );
     await notifier.initialization;
 
@@ -137,6 +139,7 @@ void main() {
       database,
       BiometricService(),
       sync,
+      currentUserId: () => lecture.teacherId,
     );
     await notifier.initialization;
     notifier.dispose();
@@ -155,9 +158,11 @@ void main() {
       database,
       BiometricService(),
       sync,
+      currentUserId: () => lecture.teacherId,
     );
     await notifier.initialization;
 
+    await notifier.selectLecture(lecture, [studentOne, studentTwo]);
     await notifier.startPassModeSession(
       lecture: lecture,
       students: [studentOne, studentTwo],
@@ -179,6 +184,7 @@ void main() {
       database,
       BiometricService(),
       sync,
+      currentUserId: () => lecture.teacherId,
     );
     await notifier.initialization;
     await notifier.restoreActiveSession(lecture.teacherId);
@@ -216,6 +222,29 @@ void main() {
     expect(historyRecords, hasLength(2));
     expect(historyRecords.map((record) => record['status']),
         containsAll(['present', 'absent']));
+    notifier.dispose();
+    sync.dispose();
+  });
+
+  test('blocks biometric check-in after the session has ended', () async {
+    final sync = _OfflineSyncEngine(database);
+    final notifier = LectureSessionNotifier(
+      database,
+      BiometricService(),
+      sync,
+      currentUserId: () => lecture.teacherId,
+    );
+    await notifier.initialization;
+    await notifier.restoreActiveSession(lecture.teacherId);
+    await notifier.endSession();
+
+    final result = await notifier.checkInStudentWithBiometrics(studentTwo);
+
+    expect(result.verified, isFalse);
+    expect(result.method, 'ended');
+    final record = notifier.state.recordsByStudentId[studentTwo.id];
+    expect(record?.status, AttendanceStatus.absent);
+    expect(record?.biometricVerified, isFalse);
     notifier.dispose();
     sync.dispose();
   });

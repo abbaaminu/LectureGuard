@@ -1,11 +1,14 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/attendance_models.dart';
+import 'local_database_service.dart';
 
 class AuthService {
   final SupabaseClient _client;
+  final LocalDatabaseService? _database;
 
-  AuthService({SupabaseClient? client})
-      : _client = client ?? Supabase.instance.client;
+  AuthService({SupabaseClient? client, LocalDatabaseService? database})
+      : _client = client ?? Supabase.instance.client,
+        _database = database;
 
   Session? get currentSession => _client.auth.currentSession;
 
@@ -24,9 +27,16 @@ class AuthService {
         .select('role')
         .eq('id', userId)
         .maybeSingle();
+    final roleName = profile?['role'] as String?;
+    await _database?.cacheUserProfileRole(userId, roleName);
     // Unknown role values are treated as "no profile" rather than thrown: the
     // access gate then shows its message instead of the screen failing.
-    return userRoleFromName(profile?['role'] as String?);
+    return userRoleFromName(roleName);
+  }
+
+  Future<UserRole?> getCachedProfileRole(String userId) async {
+    final roleName = await _database?.getCachedUserProfileRole(userId);
+    return userRoleFromName(roleName);
   }
 
   Future<void> signOut() => _client.auth.signOut();
