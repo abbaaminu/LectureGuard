@@ -39,6 +39,7 @@ class BiometricService {
   /// so students cannot bypass with a device passcode.
   Future<BiometricVerificationResult> verifyStudentIdentity({
     required String studentName,
+    String action = 'check in',
   }) async {
     try {
       final available = await isHardwareAvailable();
@@ -67,7 +68,8 @@ class BiometricService {
               : 'biometric';
 
       final didAuthenticate = await _auth.authenticate(
-        localizedReason: 'Verify identity to check in $studentName',
+        localizedReason:
+            'Verify with a device biometric to $action $studentName',
         options: const AuthenticationOptions(
           biometricOnly: true,
           stickyAuth: true,

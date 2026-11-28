@@ -41,22 +41,15 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
   List<TeacherProfile> _teachers = [];
   List<Lecture> _adminLectures = [];
   List<Map<String, dynamic>> _adminProfiles = [];
-  List<Map<String, dynamic>> _adminStudents = [];
-  List<Map<String, dynamic>> _adminEnrollments = [];
   List<Map<String, dynamic>> _schoolRecordRows = [];
   _SchoolRecordKind _schoolRecordKind = _SchoolRecordKind.attendanceRecords;
   final Set<String> _savingProfileIds = {};
-  final Set<String> _savingStudentIds = {};
-  final Set<String> _savingEnrollmentStudentIds = {};
   String? _selectedTeacherId;
-  String? _selectedEnrollmentLectureId;
   DateTime? _startDate;
   DateTime? _endDate;
   Object? _chronicError;
   Object? _logsError;
   Object? _profilesError;
-  Object? _studentsError;
-  Object? _enrollmentsError;
   bool _loadingChronic = true;
   bool _loadingMore = false;
   bool _hasMore = true;
@@ -68,8 +61,7 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
   bool _loadingAssignments = true;
   bool _savingAssignment = false;
   bool _loadingProfiles = true;
-  bool _loadingStudents = true;
-  bool _loadingEnrollments = false;
+  bool _creatingStaff = false;
   bool _loadingSchoolRecords = true;
   bool _loadingMoreSchoolRecords = false;
   bool _hasMoreSchoolRecords = true;
@@ -88,9 +80,10 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
   }
 
   Future<void> _loadAdminManagementData() async {
+    // Keep local SQLite writes sequential; concurrent cache refreshes can
+    // contend for the write lock and leave the screen half-loaded.
     await _loadCourseAssignments();
     await _loadAdminProfiles();
-    await _loadAdminStudents();
   }
 
   @override
@@ -126,17 +119,8 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
             !teachers.any((teacher) => teacher.id == _selectedTeacherId)) {
           _selectedTeacherId = teachers.isEmpty ? null : teachers.first.id;
         }
-        if (_selectedEnrollmentLectureId == null ||
-            !lectures.any(
-              (lecture) => lecture.id == _selectedEnrollmentLectureId,
-            )) {
-          _selectedEnrollmentLectureId =
-              lectures.isEmpty ? null : lectures.first.id;
-        }
         _loadingAssignments = false;
       });
-      final lectureId = _selectedEnrollmentLectureId;
-      if (lectureId != null) await _loadAdminEnrollments(lectureId);
     } catch (error) {
       final database = ref.read(localDatabaseProvider);
       final cachedProfiles = await database.getCachedAdminProfiles();
@@ -148,18 +132,9 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
             .map((profile) => TeacherProfile.fromMap(profile))
             .toList();
         _adminLectures = cachedLectures;
-        if (_selectedEnrollmentLectureId == null ||
-            !cachedLectures.any(
-              (lecture) => lecture.id == _selectedEnrollmentLectureId,
-            )) {
-          _selectedEnrollmentLectureId =
-              cachedLectures.isEmpty ? null : cachedLectures.first.id;
-        }
         _assignmentError = error;
         _loadingAssignments = false;
       });
-      final lectureId = _selectedEnrollmentLectureId;
-      if (lectureId != null) await _loadAdminEnrollments(lectureId);
     }
   }
 
@@ -186,61 +161,6 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
             cached.map((row) => Map<String, dynamic>.from(row)).toList();
         _profilesError = error;
         _loadingProfiles = false;
-      });
-    }
-  }
-
-  Future<void> _loadAdminStudents() async {
-    setState(() {
-      _loadingStudents = true;
-      _studentsError = null;
-    });
-    try {
-      final students = await ref
-          .read(lectureSessionProvider.notifier)
-          .loadAdminStudents(client: _client);
-      if (!mounted) return;
-      setState(() {
-        _adminStudents = students;
-        _loadingStudents = false;
-      });
-    } catch (error) {
-      final cached =
-          await ref.read(localDatabaseProvider).getCachedAdminStudents();
-      if (!mounted) return;
-      setState(() {
-        _adminStudents =
-            cached.map((row) => Map<String, dynamic>.from(row)).toList();
-        _studentsError = error;
-        _loadingStudents = false;
-      });
-    }
-  }
-
-  Future<void> _loadAdminEnrollments(String lectureId) async {
-    setState(() {
-      _loadingEnrollments = true;
-      _enrollmentsError = null;
-    });
-    try {
-      final enrollments = await ref
-          .read(lectureSessionProvider.notifier)
-          .loadAdminEnrollments(lectureId: lectureId, client: _client);
-      if (!mounted || lectureId != _selectedEnrollmentLectureId) return;
-      setState(() {
-        _adminEnrollments = enrollments;
-        _loadingEnrollments = false;
-      });
-    } catch (error) {
-      final cached = await ref
-          .read(localDatabaseProvider)
-          .getCachedAdminEnrollments(lectureId);
-      if (!mounted || lectureId != _selectedEnrollmentLectureId) return;
-      setState(() {
-        _adminEnrollments =
-            cached.map((row) => Map<String, dynamic>.from(row)).toList();
-        _enrollmentsError = error;
-        _loadingEnrollments = false;
       });
     }
   }
@@ -381,205 +301,37 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
     }
   }
 
-  Future<void> _createAdminStudent() async {
-    final result = await showDialog<_AdminStudentFormResult>(
+  Future<void> _createStaffLogin() async {
+    final details = await showDialog<_StaffLoginFormResult>(
       context: context,
-      builder: (_) => const _AdminStudentEditorDialog(),
+      builder: (_) => const _StaffLoginDialog(),
     );
-    if (result == null) return;
-    setState(() => _loadingStudents = true);
+    if (details == null) return;
+    setState(() => _creatingStaff = true);
     try {
-      final student =
-          await ref.read(lectureSessionProvider.notifier).createAdminStudent(
-                studentCode: result.studentCode,
-                firstName: result.firstName,
-                lastName: result.lastName,
-                gradeLevel: result.gradeLevel,
-                homeroom: result.homeroom,
-                client: _client,
-              );
-      if (!mounted) return;
-      setState(() {
-        _adminStudents = [..._adminStudents, student]
-          ..sort(_compareAdminStudents);
-        _loadingStudents = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Student created.')),
-      );
-    } catch (error) {
-      if (mounted) {
-        setState(() => _loadingStudents = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not create student: $error')),
-        );
-      }
-    }
-  }
-
-  Future<void> _editAdminStudent(Map<String, dynamic> student) async {
-    final result = await showDialog<_AdminStudentFormResult>(
-      context: context,
-      builder: (_) => _AdminStudentEditorDialog(student: student),
-    );
-    if (result == null) return;
-    final studentId = student['id'] as String;
-    setState(() => _savingStudentIds.add(studentId));
-    try {
-      final updated =
-          await ref.read(lectureSessionProvider.notifier).updateAdminStudent(
-                studentId: studentId,
-                studentCode: result.studentCode,
-                firstName: result.firstName,
-                lastName: result.lastName,
-                gradeLevel: result.gradeLevel,
-                homeroom: result.homeroom,
-                active: result.active,
-                client: _client,
-              );
-      if (!mounted) return;
-      setState(() {
-        final index =
-            _adminStudents.indexWhere((row) => row['id'] == studentId);
-        if (index >= 0) _adminStudents[index] = updated;
-        _adminStudents.sort(_compareAdminStudents);
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Student updated.')),
-      );
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not update student: $error')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _savingStudentIds.remove(studentId));
-    }
-  }
-
-  Future<void> _linkAdminStudentAccount(Map<String, dynamic> student) async {
-    final studentId = student['id'] as String;
-    final currentProfileId = student['profile_id'] as String?;
-    final linkedElsewhere = <String>{
-      for (final other in _adminStudents)
-        if (other['id'] != studentId && other['profile_id'] is String)
-          other['profile_id'] as String,
-    };
-    final selectableProfiles = _adminProfiles
-        .where(
-          (profile) =>
-              profile['role'] == UserRole.student.name ||
-              profile['id'] == currentProfileId,
-        )
-        .where(
-          (profile) =>
-              !linkedElsewhere.contains(profile['id']) ||
-              profile['id'] == currentProfileId,
-        )
-        .toList()
-      ..sort(
-        (first, second) => (first['full_name'] as String)
-            .toLowerCase()
-            .compareTo((second['full_name'] as String).toLowerCase()),
-      );
-    final selectedProfileId = await showDialog<String>(
-      context: context,
-      builder: (_) => _AdminStudentAccountDialog(
-        studentName: '${student['first_name']} ${student['last_name']}',
-        currentProfileId: currentProfileId,
-        profiles: selectableProfiles,
-      ),
-    );
-    if (selectedProfileId == null) return;
-    setState(() => _savingStudentIds.add(studentId));
-    try {
-      final updated = await ref
-          .read(lectureSessionProvider.notifier)
-          .setAdminStudentProfile(
-            studentId: studentId,
-            profileId: selectedProfileId.isEmpty ? null : selectedProfileId,
+      await ref.read(lectureSessionProvider.notifier).createStaffLogin(
+            email: details.email,
+            password: details.password,
+            role: details.role,
+            fullName: details.fullName,
+            department: details.department,
             client: _client,
           );
-      if (!mounted) return;
-      setState(() {
-        final index =
-            _adminStudents.indexWhere((row) => row['id'] == studentId);
-        if (index >= 0) _adminStudents[index] = updated;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            selectedProfileId.isEmpty
-                ? 'Student login account unlinked.'
-                : 'Student login account linked.',
-          ),
-        ),
-      );
+      await _loadAdminProfiles();
+      await _loadCourseAssignments();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${details.role.name} login created.')),
+        );
+      }
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not update student account: $error')),
+          SnackBar(content: Text('Could not create staff login: $error')),
         );
       }
     } finally {
-      if (mounted) setState(() => _savingStudentIds.remove(studentId));
-    }
-  }
-
-  int _compareAdminStudents(
-    Map<String, dynamic> first,
-    Map<String, dynamic> second,
-  ) =>
-      (first['last_name'] as String)
-          .toLowerCase()
-          .compareTo((second['last_name'] as String).toLowerCase());
-
-  Future<void> _setEnrollment(
-    Map<String, dynamic> student,
-    bool active,
-  ) async {
-    final lectureId = _selectedEnrollmentLectureId;
-    if (lectureId == null) return;
-    final studentId = student['id'] as String;
-    setState(() => _savingEnrollmentStudentIds.add(studentId));
-    try {
-      await ref.read(lectureSessionProvider.notifier).setAdminEnrollment(
-            lectureId: lectureId,
-            studentId: studentId,
-            active: active,
-            client: _client,
-          );
-      if (!mounted) return;
-      setState(() {
-        final index = _adminEnrollments.indexWhere(
-          (row) => row['student_id'] == studentId,
-        );
-        if (index < 0) {
-          _adminEnrollments.add({
-            'lecture_id': lectureId,
-            'student_id': studentId,
-            'active': active,
-          });
-        } else {
-          _adminEnrollments[index]['active'] = active;
-        }
-      });
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Could not ${active ? 'enroll' : 'unenroll'} '
-              '${student['first_name']} ${student['last_name']}: $error',
-            ),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _savingEnrollmentStudentIds.remove(studentId));
-      }
+      if (mounted) setState(() => _creatingStaff = false);
     }
   }
 
@@ -1281,8 +1033,11 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
             '${row['enrolled_snapshot_count']} enrolled · '
             'submitted ${row['submitted_to_cloud_at'] ?? 'not yet'}';
       case _SchoolRecordKind.students:
-        return '${row['student_code']} · Grade ${row['grade_level']} '
-            '${row['homeroom']} · '
+        final grade = row['grade_level'];
+        final homeroom = row['homeroom']?.toString().trim();
+        return '${row['student_code']} · '
+            '${grade == null ? 'Grade not set' : 'Grade $grade'} · '
+            '${homeroom == null || homeroom.isEmpty ? 'Homeroom not set' : 'Homeroom $homeroom'} · '
             '${row['active'] == true ? 'Active' : 'Inactive'}';
     }
   }
@@ -1370,16 +1125,15 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
 
   Widget _buildAdminManagementTab() {
     final currentUserId = _client.auth.currentUser?.id;
-    final enrolledStudentIds = _adminEnrollments
-        .where((row) => row['active'] == true || row['active'] == 1)
-        .map((row) => row['student_id'] as String)
-        .toSet();
-
+    final staffProfiles = _adminProfiles.where(
+      (profile) =>
+          profile['role'] == UserRole.admin.name ||
+          profile['role'] == UserRole.teacher.name,
+    );
     return RefreshIndicator(
       onRefresh: () async {
         await Future.wait([
           _loadAdminProfiles(),
-          _loadAdminStudents(),
           _loadCourseAssignments(),
         ]);
       },
@@ -1388,23 +1142,26 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           Text(
-            'Manage existing school accounts, student records, and lecture enrollment.',
+            'Create staff logins, manage staff roles, and assign courses to lecturers.',
             style: Theme.of(context).textTheme.bodyMedium,
           ),
           const SizedBox(height: 8),
-          const Card(
-            child: Padding(
-              padding: EdgeInsets.all(12),
-              child: Text(
-                'Create new accounts in Supabase Auth first. This screen can manage roles only for profiles that already exist; it does not create Auth users or send invitations.',
-              ),
-            ),
+          FilledButton.icon(
+            onPressed: _creatingStaff ? null : _createStaffLogin,
+            icon: _creatingStaff
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.person_add_alt_1),
+            label: const Text('Create Staff Login'),
           ),
           const SizedBox(height: 8),
           ExpansionTile(
             initiallyExpanded: true,
             title: const Text('Profiles & roles'),
-            subtitle: Text('${_adminProfiles.length} cached profile(s)'),
+            subtitle: Text('${staffProfiles.length} staff profile(s)'),
             trailing: IconButton(
               tooltip: 'Refresh profiles',
               onPressed: _loadingProfiles
@@ -1427,7 +1184,7 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
               if (_loadingProfiles) const LinearProgressIndicator(),
               if (_adminProfiles.isEmpty && !_loadingProfiles)
                 const ListTile(title: Text('No profiles are cached.')),
-              ..._adminProfiles.map((profile) {
+              ...staffProfiles.map((profile) {
                 final profileId = profile['id'] as String;
                 final email = profile['email'] as String;
                 final isCurrentUser = profileId == currentUserId;
@@ -1446,7 +1203,7 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
                       : DropdownButton<UserRole>(
                           value: role,
                           hint: const Text('Unknown'),
-                          items: UserRole.values
+                          items: [UserRole.admin, UserRole.teacher]
                               .map(
                                 (value) => DropdownMenuItem(
                                   value: value,
@@ -1465,202 +1222,13 @@ class _AdminAnalyticsScreenState extends ConsumerState<AdminAnalyticsScreen> {
                         ),
                 );
               }),
-              if (_adminProfiles.any((row) => row['id'] == currentUserId))
+              if (staffProfiles.any((row) => row['id'] == currentUserId))
                 const Padding(
                   padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
                   child: Text(
                     'Your own role is locked here to avoid accidentally removing your admin access.',
                   ),
                 ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          ExpansionTile(
-            initiallyExpanded: true,
-            title: const Text('Students'),
-            subtitle: Text('${_adminStudents.length} cached student record(s)'),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(
-                  tooltip: 'Refresh students',
-                  onPressed: _loadingStudents
-                      ? null
-                      : () => unawaited(_loadAdminStudents()),
-                  icon: const Icon(Icons.refresh),
-                ),
-                IconButton(
-                  tooltip: 'Add student',
-                  onPressed: _createAdminStudent,
-                  icon: const Icon(Icons.person_add_alt_1),
-                ),
-              ],
-            ),
-            children: [
-              if (_studentsError != null)
-                ListTile(
-                  title: Text(
-                    'Could not refresh students: $_studentsError'
-                    '${_adminStudents.isEmpty ? '' : '. Showing cached students.'}',
-                  ),
-                  trailing: TextButton(
-                    onPressed: _loadAdminStudents,
-                    child: const Text('Retry'),
-                  ),
-                ),
-              if (_loadingStudents) const LinearProgressIndicator(),
-              if (_adminStudents.isEmpty && !_loadingStudents)
-                const ListTile(title: Text('No student records are cached.')),
-              ..._adminStudents.map((student) {
-                final active =
-                    student['active'] == true || student['active'] == 1;
-                final profileId = student['profile_id'] as String?;
-                String? linkedEmail;
-                if (profileId != null) {
-                  for (final profile in _adminProfiles) {
-                    if (profile['id'] == profileId) {
-                      linkedEmail = profile['email'] as String?;
-                      break;
-                    }
-                  }
-                }
-                final loginLabel = profileId == null
-                    ? ' · No login linked'
-                    : ' · Login: ${linkedEmail ?? 'linked'}';
-                return ListTile(
-                  title: Text(
-                    '${student['last_name']}, ${student['first_name']}',
-                  ),
-                  subtitle: Text(
-                    '${student['student_code']} · Grade ${student['grade_level']} · '
-                    '${student['homeroom']} · ${active ? 'Active' : 'Inactive'}'
-                    '$loginLabel',
-                  ),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        tooltip: profileId == null
-                            ? 'Link student login'
-                            : 'Manage student login',
-                        onPressed: _savingStudentIds.contains(student['id'])
-                            ? null
-                            : () => _linkAdminStudentAccount(student),
-                        icon: Icon(
-                          profileId == null
-                              ? Icons.manage_accounts_outlined
-                              : Icons.verified_user_outlined,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip:
-                            'Edit ${student['first_name']} ${student['last_name']}',
-                        onPressed: _savingStudentIds.contains(student['id'])
-                            ? null
-                            : () => _editAdminStudent(student),
-                        icon: _savingStudentIds.contains(student['id'])
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.edit_outlined),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-            ],
-          ),
-          const SizedBox(height: 8),
-          ExpansionTile(
-            initiallyExpanded: true,
-            title: const Text('Lecture enrollment'),
-            subtitle: const Text('Enroll or unenroll students in a lecture'),
-            children: [
-              if (_adminLectures.isEmpty)
-                const ListTile(
-                  title: Text(
-                      'Create or load a lecture before enrolling students.'),
-                )
-              else
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: DropdownButtonFormField<String>(
-                    initialValue: _selectedEnrollmentLectureId,
-                    decoration: const InputDecoration(labelText: 'Lecture'),
-                    items: _adminLectures
-                        .map(
-                          (lecture) => DropdownMenuItem(
-                            value: lecture.id,
-                            child: Text(
-                              '${lecture.courseCode} · ${lecture.title}',
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (lectureId) {
-                      if (lectureId == null) return;
-                      setState(() {
-                        _selectedEnrollmentLectureId = lectureId;
-                        _adminEnrollments = [];
-                      });
-                      unawaited(_loadAdminEnrollments(lectureId));
-                    },
-                  ),
-                ),
-              if (_enrollmentsError != null)
-                ListTile(
-                  title: Text(
-                    'Could not refresh lecture enrollment: $_enrollmentsError'
-                    '${_adminEnrollments.isEmpty ? '' : '. Showing cached enrollment.'}',
-                  ),
-                  trailing: TextButton(
-                    onPressed: _selectedEnrollmentLectureId == null
-                        ? null
-                        : () => _loadAdminEnrollments(
-                              _selectedEnrollmentLectureId!,
-                            ),
-                    child: const Text('Retry'),
-                  ),
-                ),
-              if (_loadingEnrollments) const LinearProgressIndicator(),
-              if (_adminLectures.isNotEmpty &&
-                  !_loadingStudents &&
-                  _adminStudents.isEmpty)
-                const ListTile(
-                  title: Text('Create student records before enrolling.'),
-                ),
-              ..._adminStudents.map((student) {
-                final studentId = student['id'] as String;
-                final activeStudent =
-                    student['active'] == true || student['active'] == 1;
-                final enrolled = enrolledStudentIds.contains(studentId);
-                final isSaving =
-                    _savingEnrollmentStudentIds.contains(studentId);
-                return SwitchListTile(
-                  title: Text(
-                    '${student['last_name']}, ${student['first_name']}',
-                  ),
-                  subtitle: Text(
-                    '${student['student_code']} · '
-                    '${activeStudent ? 'Active student' : 'Inactive student'}',
-                  ),
-                  value: enrolled,
-                  onChanged: isSaving || (!activeStudent && !enrolled)
-                      ? null
-                      : (value) => _setEnrollment(student, value),
-                  secondary: isSaving
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : null,
-                );
-              }),
             ],
           ),
         ],
@@ -2001,209 +1569,78 @@ class _StudentWeeklyTrendDialogState extends State<_StudentWeeklyTrendDialog> {
   }
 }
 
-class _AdminStudentFormResult {
-  final String studentCode;
-  final String firstName;
-  final String lastName;
-  final int gradeLevel;
-  final String homeroom;
-  final bool active;
+class _StaffLoginFormResult {
+  final String email;
+  final String password;
+  final UserRole role;
+  final String? fullName;
+  final String? department;
 
-  const _AdminStudentFormResult({
-    required this.studentCode,
-    required this.firstName,
-    required this.lastName,
-    required this.gradeLevel,
-    required this.homeroom,
-    required this.active,
+  const _StaffLoginFormResult({
+    required this.email,
+    required this.password,
+    required this.role,
+    this.fullName,
+    this.department,
   });
 }
 
-class _AdminStudentAccountDialog extends StatefulWidget {
-  final String studentName;
-  final String? currentProfileId;
-  final List<Map<String, dynamic>> profiles;
-
-  const _AdminStudentAccountDialog({
-    required this.studentName,
-    required this.currentProfileId,
-    required this.profiles,
-  });
+class _StaffLoginDialog extends StatefulWidget {
+  const _StaffLoginDialog();
 
   @override
-  State<_AdminStudentAccountDialog> createState() =>
-      _AdminStudentAccountDialogState();
+  State<_StaffLoginDialog> createState() => _StaffLoginDialogState();
 }
 
-class _AdminStudentAccountDialogState
-    extends State<_AdminStudentAccountDialog> {
-  late String _selectedProfileId;
-
-  bool get _hasCurrentProfile =>
-      widget.currentProfileId != null &&
-      widget.profiles.any(
-        (profile) => profile['id'] == widget.currentProfileId,
-      );
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedProfileId = _hasCurrentProfile
-        ? widget.currentProfileId!
-        : widget.currentProfileId ?? '';
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-        title: const Text('Student login account'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Link ${widget.studentName} to the Supabase login used for '
-                'student self-service attendance. Only profiles with the '
-                'student role are listed.',
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                initialValue: _selectedProfileId,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: 'Login account',
-                ),
-                items: [
-                  const DropdownMenuItem(
-                    value: '',
-                    child: Text('No linked account'),
-                  ),
-                  if (widget.currentProfileId != null && !_hasCurrentProfile)
-                    DropdownMenuItem(
-                      value: widget.currentProfileId!,
-                      child: Text(
-                        'Current linked account '
-                        '(${widget.currentProfileId})',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ...widget.profiles.map(
-                    (profile) => DropdownMenuItem(
-                      value: profile['id'] as String,
-                      child: Text(
-                        '${profile['full_name']} · ${profile['email']}',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ),
-                ],
-                onChanged: (value) {
-                  if (value != null) {
-                    setState(() => _selectedProfileId = value);
-                  }
-                },
-              ),
-              if (widget.profiles.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 12),
-                  child: Text(
-                    'No unlinked student accounts are available. Provision the '
-                    'account and set its profile role to Student first.',
-                  ),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, _selectedProfileId),
-            child: const Text('Save'),
-          ),
-        ],
-      );
-}
-
-class _AdminStudentEditorDialog extends StatefulWidget {
-  final Map<String, dynamic>? student;
-
-  const _AdminStudentEditorDialog({this.student});
-
-  @override
-  State<_AdminStudentEditorDialog> createState() =>
-      _AdminStudentEditorDialogState();
-}
-
-class _AdminStudentEditorDialogState extends State<_AdminStudentEditorDialog> {
+class _StaffLoginDialogState extends State<_StaffLoginDialog> {
   final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _codeController;
-  late final TextEditingController _firstNameController;
-  late final TextEditingController _lastNameController;
-  late final TextEditingController _gradeController;
-  late final TextEditingController _homeroomController;
-  late bool _active;
-
-  @override
-  void initState() {
-    super.initState();
-    final student = widget.student;
-    _codeController =
-        TextEditingController(text: student?['student_code'] as String? ?? '');
-    _firstNameController =
-        TextEditingController(text: student?['first_name'] as String? ?? '');
-    _lastNameController =
-        TextEditingController(text: student?['last_name'] as String? ?? '');
-    _gradeController = TextEditingController(
-      text: student == null ? '' : '${student['grade_level']}',
-    );
-    _homeroomController =
-        TextEditingController(text: student?['homeroom'] as String? ?? '');
-    _active =
-        student == null || student['active'] == true || student['active'] == 1;
-  }
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _nameController = TextEditingController();
+  final _departmentController = TextEditingController();
+  UserRole _role = UserRole.teacher;
 
   @override
   void dispose() {
-    _codeController.dispose();
-    _firstNameController.dispose();
-    _lastNameController.dispose();
-    _gradeController.dispose();
-    _homeroomController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _nameController.dispose();
+    _departmentController.dispose();
     super.dispose();
   }
 
-  String? _required(String? value, String label) =>
-      value == null || value.trim().isEmpty ? '$label is required.' : null;
-
-  String? _validateGrade(String? value) {
-    final grade = int.tryParse(value ?? '');
-    if (grade == null || grade < 9 || grade > 12) {
-      return 'Enter a grade from 9 to 12.';
+  String? _validEmail(String? value) {
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(value?.trim() ?? '')) {
+      return 'Enter a valid email address.';
     }
+    return null;
+  }
+
+  String? _validPassword(String? value) {
+    if ((value ?? '').length < 12) return 'Use at least 12 characters.';
     return null;
   }
 
   void _save() {
     if (!_formKey.currentState!.validate()) return;
     Navigator.of(context).pop(
-      _AdminStudentFormResult(
-        studentCode: _codeController.text.trim(),
-        firstName: _firstNameController.text.trim(),
-        lastName: _lastNameController.text.trim(),
-        gradeLevel: int.parse(_gradeController.text),
-        homeroom: _homeroomController.text.trim(),
-        active: _active,
+      _StaffLoginFormResult(
+        email: _emailController.text.trim(),
+        password: _passwordController.text,
+        role: _role,
+        fullName: _nameController.text.trim().isEmpty
+            ? null
+            : _nameController.text.trim(),
+        department: _departmentController.text.trim().isEmpty
+            ? null
+            : _departmentController.text.trim(),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: Text(widget.student == null ? 'Add student' : 'Edit student'),
+        title: const Text('Create Staff Login'),
         content: SingleChildScrollView(
           child: Form(
             key: _formKey,
@@ -2211,39 +1648,48 @@ class _AdminStudentEditorDialogState extends State<_AdminStudentEditorDialog> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextFormField(
-                  controller: _codeController,
-                  decoration: const InputDecoration(labelText: 'Student code'),
-                  validator: (value) => _required(value, 'Student code'),
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: 'Email'),
+                  validator: _validEmail,
                 ),
                 TextFormField(
-                  controller: _firstNameController,
-                  decoration: const InputDecoration(labelText: 'First name'),
-                  validator: (value) => _required(value, 'First name'),
-                ),
-                TextFormField(
-                  controller: _lastNameController,
-                  decoration: const InputDecoration(labelText: 'Last name'),
-                  validator: (value) => _required(value, 'Last name'),
-                ),
-                TextFormField(
-                  controller: _gradeController,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: const InputDecoration(labelText: 'Grade (9-12)'),
-                  validator: _validateGrade,
-                ),
-                TextFormField(
-                  controller: _homeroomController,
-                  decoration: const InputDecoration(labelText: 'Homeroom'),
-                  validator: (value) => _required(value, 'Homeroom'),
-                ),
-                if (widget.student != null)
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Active student'),
-                    value: _active,
-                    onChanged: (value) => setState(() => _active = value),
+                  controller: _passwordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Initial password',
+                    helperText: 'At least 12 characters',
                   ),
+                  validator: _validPassword,
+                ),
+                TextFormField(
+                  controller: _nameController,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Full name (optional)',
+                  ),
+                ),
+                TextFormField(
+                  controller: _departmentController,
+                  decoration: const InputDecoration(
+                    labelText: 'Department (optional)',
+                  ),
+                ),
+                DropdownButtonFormField<UserRole>(
+                  initialValue: _role,
+                  decoration: const InputDecoration(labelText: 'Staff role'),
+                  items: const [UserRole.teacher, UserRole.admin]
+                      .map(
+                        (role) => DropdownMenuItem(
+                          value: role,
+                          child: Text(role.name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) setState(() => _role = value);
+                  },
+                ),
               ],
             ),
           ),
@@ -2255,7 +1701,7 @@ class _AdminStudentEditorDialogState extends State<_AdminStudentEditorDialog> {
           ),
           FilledButton(
             onPressed: _save,
-            child: Text(widget.student == null ? 'Create student' : 'Save'),
+            child: const Text('Create login'),
           ),
         ],
       );

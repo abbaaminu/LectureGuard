@@ -6,6 +6,18 @@ enum SyncStatus { pending, synced, failed }
 
 enum UserRole { admin, teacher, student }
 
+class StudentEnrollmentResult {
+  final Student student;
+  final bool syncedToCloud;
+  final String? syncError;
+
+  const StudentEnrollmentResult({
+    required this.student,
+    required this.syncedToCloud,
+    this.syncError,
+  });
+}
+
 /// Maps a `profiles.role` value to a [UserRole] without throwing.
 ///
 /// `UserRole.values.byName` raises an [ArgumentError] for anything it does not
@@ -28,20 +40,24 @@ class Student {
   final String studentCode;
   final String firstName;
   final String lastName;
-  final int gradeLevel;
-  final String homeroom;
+  final int? gradeLevel;
+  final String? homeroom;
+  final DateTime? biometricEnrollmentCapturedAt;
+  final String? biometricEnrollmentMethod;
 
   const Student({
     required this.id,
     required this.studentCode,
     required this.firstName,
     required this.lastName,
-    required this.gradeLevel,
-    required this.homeroom,
+    this.gradeLevel,
+    this.homeroom,
+    this.biometricEnrollmentCapturedAt,
+    this.biometricEnrollmentMethod,
   });
 
-  String get fullName => '$lastName, $firstName';
-  String get displayName => '$firstName $lastName';
+  String get fullName => lastName.isEmpty ? firstName : '$lastName, $firstName';
+  String get displayName => '$firstName $lastName'.trim();
   String get sortInitial {
     final trimmed = lastName.trimLeft();
     if (trimmed.isEmpty) return '#';
@@ -54,8 +70,16 @@ class Student {
         studentCode: map['student_code'] as String,
         firstName: map['first_name'] as String,
         lastName: map['last_name'] as String,
-        gradeLevel: map['grade_level'] as int,
-        homeroom: map['homeroom'] as String,
+        gradeLevel: map['grade_level'] as int?,
+        homeroom: map['homeroom'] as String?,
+        biometricEnrollmentCapturedAt:
+            map['biometric_enrollment_captured_at'] == null
+                ? null
+                : DateTime.parse(
+                    map['biometric_enrollment_captured_at'] as String,
+                  ),
+        biometricEnrollmentMethod:
+            map['biometric_enrollment_method'] as String?,
       );
 
   Map<String, dynamic> toMap() => {
@@ -65,6 +89,9 @@ class Student {
         'last_name': lastName,
         'grade_level': gradeLevel,
         'homeroom': homeroom,
+        'biometric_enrollment_captured_at':
+            biometricEnrollmentCapturedAt?.toIso8601String(),
+        'biometric_enrollment_method': biometricEnrollmentMethod,
       };
 }
 

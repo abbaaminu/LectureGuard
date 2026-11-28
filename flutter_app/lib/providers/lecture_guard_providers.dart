@@ -346,209 +346,45 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     await _db.cacheUserProfileRole(profileId, role.name);
   }
 
-  Future<List<Map<String, dynamic>>> loadAdminStudents({
+  Future<Map<String, dynamic>> createStaffLogin({
+    required String email,
+    required String password,
+    required UserRole role,
+    String? fullName,
+    String? department,
     SupabaseClient? client,
   }) async {
-    final supabase = client ?? Supabase.instance.client;
-    const pageSize = 500;
-    final students = <Map<String, dynamic>>[];
-    var offset = 0;
-    while (true) {
-      final rows = await supabase
-          .from('students')
-          .select(
-              'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
-          .order('last_name')
-          .order('first_name')
-          .range(offset, offset + pageSize - 1);
-      students.addAll(rows.map((row) => Map<String, dynamic>.from(row)));
-      if (rows.length < pageSize) break;
-      offset += pageSize;
+    if (role != UserRole.teacher && role != UserRole.admin) {
+      throw ArgumentError('Staff login role must be teacher or admin.');
     }
-    await _db.cacheAdminStudents(students);
-    return students;
-  }
-
-  Future<Map<String, dynamic>> createAdminStudent({
-    required String studentCode,
-    required String firstName,
-    required String lastName,
-    required int gradeLevel,
-    required String homeroom,
-    SupabaseClient? client,
-  }) async {
-    final values = _validatedAdminStudentValues(
-      studentCode: studentCode,
-      firstName: firstName,
-      lastName: lastName,
-      gradeLevel: gradeLevel,
-      homeroom: homeroom,
-      active: true,
+    final response =
+        await (client ?? Supabase.instance.client).functions.invoke(
+      'admin-create-user',
+      body: {
+        'email': email.trim(),
+        'password': password,
+        'role': role.name,
+        'full_name': fullName?.trim(),
+        'department': department?.trim(),
+      },
     );
-    final row = await (client ?? Supabase.instance.client)
-        .from('students')
-        .insert(values)
-        .select(
-            'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
-        .single();
-    final student = Map<String, dynamic>.from(row);
-    await _db.cacheAdminStudent(student);
-    return student;
-  }
-
-  Future<Map<String, dynamic>> updateAdminStudent({
-    required String studentId,
-    required String studentCode,
-    required String firstName,
-    required String lastName,
-    required int gradeLevel,
-    required String homeroom,
-    required bool active,
-    SupabaseClient? client,
-  }) async {
-    final values = _validatedAdminStudentValues(
-      studentCode: studentCode,
-      firstName: firstName,
-      lastName: lastName,
-      gradeLevel: gradeLevel,
-      homeroom: homeroom,
-      active: active,
-    );
-    final row = await (client ?? Supabase.instance.client)
-        .from('students')
-        .update(values)
-        .eq('id', studentId)
-        .select(
-            'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
-        .single();
-    final student = Map<String, dynamic>.from(row);
-    await _db.cacheAdminStudent(student);
-    return student;
-  }
-
-  /// Links a student record to the Supabase auth profile used by the student
-  /// self-service screen. Passing null unlinks the account.
-  Future<Map<String, dynamic>> setAdminStudentProfile({
-    required String studentId,
-    String? profileId,
-    SupabaseClient? client,
-  }) async {
-    final normalizedProfileId = profileId?.trim();
-    final row = await (client ?? Supabase.instance.client)
-        .from('students')
-        .update({
-          'profile_id':
-              normalizedProfileId == null || normalizedProfileId.isEmpty
-                  ? null
-                  : normalizedProfileId,
-        })
-        .eq('id', studentId)
-        .select(
-            'id, profile_id, student_code, first_name, last_name, grade_level, homeroom, active')
-        .single();
-    final student = Map<String, dynamic>.from(row);
-    await _db.cacheAdminStudent(student);
-    return student;
-  }
-
-  Map<String, dynamic> _validatedAdminStudentValues({
-    required String studentCode,
-    required String firstName,
-    required String lastName,
-    required int gradeLevel,
-    required String homeroom,
-    required bool active,
-  }) {
-    final normalizedCode = studentCode.trim();
-    final normalizedFirstName = firstName.trim();
-    final normalizedLastName = lastName.trim();
-    final normalizedHomeroom = homeroom.trim();
-    if (normalizedCode.isEmpty ||
-        normalizedFirstName.isEmpty ||
-        normalizedLastName.isEmpty ||
-        normalizedHomeroom.isEmpty) {
-      throw ArgumentError('Student code, names, and homeroom are required.');
+    if (response.status < 200 || response.status >= 300) {
+      throw StateError('Staff account creation failed: ${response.data}');
     }
-    if (gradeLevel < 9 || gradeLevel > 12) {
-      throw ArgumentError('Grade level must be between 9 and 12.');
+    if (response.data is! Map) {
+      throw StateError('Staff account creation returned an invalid response.');
     }
-    return {
-      'student_code': normalizedCode,
-      'first_name': normalizedFirstName,
-      'last_name': normalizedLastName,
-      'grade_level': gradeLevel,
-      'homeroom': normalizedHomeroom,
-      'active': active,
-    };
-  }
-
-  Future<List<Map<String, dynamic>>> loadAdminEnrollments({
-    required String lectureId,
-    SupabaseClient? client,
-  }) async {
-    final supabase = client ?? Supabase.instance.client;
-    const pageSize = 500;
-    final enrollments = <Map<String, dynamic>>[];
-    var offset = 0;
-    while (true) {
-      final rows = await supabase
-          .from('enrollments')
-          .select('lecture_id, student_id, active')
-          .eq('lecture_id', lectureId)
-          .range(offset, offset + pageSize - 1);
-      enrollments.addAll(rows.map((row) => Map<String, dynamic>.from(row)));
-      if (rows.length < pageSize) break;
-      offset += pageSize;
+    final profile = Map<String, dynamic>.from(response.data as Map);
+    if (profile['id'] is! String || profile['email'] is! String) {
+      throw StateError('Staff account creation omitted profile details.');
     }
-    await _db.cacheAdminEnrollments(lectureId, enrollments);
-    return enrollments;
-  }
-
-  Future<void> setAdminEnrollment({
-    required String lectureId,
-    required String studentId,
-    required bool active,
-    SupabaseClient? client,
-  }) async {
-    final supabase = client ?? Supabase.instance.client;
-    if (active) {
-      final cachedStudents = await _db.getCachedAdminStudents();
-      final hasActiveCachedStudent = cachedStudents.any(
-        (student) =>
-            student['id'] == studentId &&
-            (student['active'] == true || student['active'] == 1),
-      );
-      if (!hasActiveCachedStudent) {
-        throw StateError(
-          'Refresh students before enrolling; only active students can be enrolled.',
-        );
-      }
-      await supabase
-          .from('enrollments')
-          .upsert(
-            {
-              'lecture_id': lectureId,
-              'student_id': studentId,
-              'active': true,
-            },
-            onConflict: 'lecture_id,student_id',
-          )
-          .select('lecture_id, student_id, active')
-          .single();
-    } else {
-      await supabase
-          .from('enrollments')
-          .update({'active': false})
-          .eq('lecture_id', lectureId)
-          .eq('student_id', studentId)
-          .select('lecture_id')
-          .maybeSingle();
-    }
-    await _db.cacheAdminEnrollment(
-      lectureId: lectureId,
-      studentId: studentId,
-      active: active,
-    );
+    await _db.cacheAdminProfiles([
+      ...(await _db.getCachedAdminProfiles())
+          .map((row) => Map<String, dynamic>.from(row))
+          .where((row) => row['id'] != profile['id']),
+      profile,
+    ]);
+    return profile;
   }
 
   Future<List<Lecture>> loadAllLectures({SupabaseClient? client}) async {
@@ -867,6 +703,13 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
     final validationError = await validateLectureAssignmentLocally(lecture);
     if (validationError != null) throw StateError(validationError);
     if (await _syncEngine.isOnline()) {
+      final teacherId = _currentUserId();
+      if (teacherId == null) {
+        throw StateError('Sign in before refreshing the lecture roster.');
+      }
+      final syncErrors =
+          await _syncEngine.syncPendingTeacherEnrollments(teacherId);
+      if (syncErrors.isNotEmpty) throw StateError(syncErrors.join('; '));
       final rows = await Supabase.instance.client
           .from('enrollments')
           .select(
@@ -883,6 +726,71 @@ class LectureSessionNotifier extends StateNotifier<SessionState> {
       return _db.getAlphabeticalRoster(lecture.id);
     }
     return _db.getAlphabeticalRoster(lecture.id);
+  }
+
+  Future<StudentEnrollmentResult> enrollStudentInLecture({
+    required Lecture lecture,
+    required String studentName,
+    required String studentCode,
+  }) async {
+    final teacherId = _currentUserId();
+    if (teacherId == null) {
+      throw StateError('Sign in before enrolling a student.');
+    }
+    if (lecture.teacherId != teacherId) {
+      throw StateError(
+          'You can only enroll students in your assigned lectures.');
+    }
+    final assignmentError = await validateLectureAssignmentLocally(lecture);
+    if (assignmentError != null) throw StateError(assignmentError);
+    final normalizedName = studentName.trim().replaceAll(RegExp(r'\s+'), ' ');
+    final normalizedCode = studentCode.trim();
+    if (normalizedName.isEmpty || normalizedCode.isEmpty) {
+      throw ArgumentError('Student name and registration number are required.');
+    }
+
+    final verification = await _biometrics.verifyStudentIdentity(
+      studentName: normalizedName,
+      action: 'enroll',
+    );
+    if (!verification.verified) {
+      throw StateError(
+        verification.errorMessage ??
+            'Biometric verification was not completed.',
+      );
+    }
+
+    final nameParts = normalizedName.split(' ');
+    final student = Student(
+      id: _uuid.v4(),
+      studentCode: normalizedCode,
+      firstName: nameParts.first,
+      lastName: nameParts.skip(1).join(' '),
+      biometricEnrollmentCapturedAt: DateTime.now(),
+      biometricEnrollmentMethod: verification.method,
+    );
+    await _db.savePendingTeacherEnrollment(
+      lectureId: lecture.id,
+      teacherId: teacherId,
+      student: student,
+    );
+
+    String? syncError;
+    var syncedToCloud = false;
+    if (await _syncEngine.isOnline()) {
+      final errors = await _syncEngine.syncPendingTeacherEnrollments(teacherId);
+      syncedToCloud = errors.isEmpty;
+      if (errors.isNotEmpty) syncError = errors.join('; ');
+    }
+    if (state.activeLecture?.id == lecture.id) {
+      final roster = await _db.getAlphabeticalRoster(lecture.id);
+      _setState((current) => current.copyWith(roster: roster));
+    }
+    return StudentEnrollmentResult(
+      student: student,
+      syncedToCloud: syncedToCloud,
+      syncError: syncError,
+    );
   }
 
   Future<void> selectLecture(Lecture lecture, List<Student> students) async {

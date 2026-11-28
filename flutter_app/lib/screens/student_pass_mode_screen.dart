@@ -505,7 +505,11 @@ class _StudentPassModeScreenState extends ConsumerState<StudentPassModeScreen>
                                                           ? 'Checked In · Late'
                                                           : isPresent
                                                               ? 'Checked In · Present'
-                                                              : '${student.studentCode} · Gr ${student.gradeLevel}',
+                                                              : student.gradeLevel ==
+                                                                      null
+                                                                  ? student
+                                                                      .studentCode
+                                                                  : '${student.studentCode} · Gr ${student.gradeLevel}',
                                                   maxLines: 1,
                                                   overflow:
                                                       TextOverflow.ellipsis,

@@ -54,6 +54,28 @@ Apply these SQL files in order using the Supabase CLI or SQL editor:
 7. `supabase/migrations/007_teacher_update_own_lecture_schedule.sql` — lets
    teachers update timetable fields on their assigned lectures while keeping
    course identity and teacher assignment administrator-owned.
+8. `supabase/migrations/008_teacher_enrollment_and_staff_scope.sql` — moves
+   student enrollment to the assigned teacher, limits admin student/enrollment
+   access to reporting, and permits missing grade/homeroom details.
+
+### Creating staff logins
+
+The Admin Management screen creates teacher/admin Auth users through the
+`admin-create-user` Edge Function. Apply migrations through 008, set the
+service-role key only as a Supabase Function secret, and deploy the function:
+
+```powershell
+supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+supabase functions deploy admin-create-user
+```
+
+`SUPABASE_URL` and `SUPABASE_ANON_KEY` are provided to deployed Supabase
+Functions. The function verifies the caller's current `public.profiles.role`
+before using the service role to create the Auth user and upsert its profile.
+The Admin screen sends only the signed-in user's access token and form values;
+never put the service-role key in `flutter_app/env.json` or the mobile app.
+Staff logins are created with a confirmed email and the initial password set
+by the administrator.
 
 ### Accounts, profiles and roles
 
@@ -82,12 +104,16 @@ app). Both role helpers are revoked from `anon`, so the publishable key cannot
 change roles. The client uses only the anon/publishable key; RLS enforces
 access.
 
-Student accounts can sign in to a read-only **My Attendance** screen, but only
-after an administrator links the auth profile to a student row: Admin →
-Students → the account icon → choose the student-role profile. The link is
-stored in `students.profile_id` (unique). Student accounts cannot check
-themselves in; Pass Mode remains a shared invigilator tablet, and an account
-without a link sees an instruction to contact an administrator.
+Teachers enroll students in their assigned lecture using a name and
+registration number. This creates a student roster record, not a student login.
+The teacher enrollment RPC checks the caller's role and lecture assignment and
+creates/reactivates the corresponding enrollment. Admin Management does not
+create student records or manage lecture enrollment.
+
+Student accounts can sign in to the read-only **My Attendance** screen only
+when their auth profile is linked to a student row in `students.profile_id`.
+Student self-check-in is not enabled; Pass Mode remains a shared invigilator
+tablet.
 
 ## Attendance and biometric limitations
 
@@ -99,6 +125,11 @@ Completed session history remains available from local SQLite.
 registered on this device was successfully used. It does **not** identify which
 student supplied the biometric. Pass Mode therefore remains an assisted
 attendance workflow; it is not proof of student identity.
+
+The teacher enrollment workflow records only the successful device-biometric
+verification time and method in local SQLite. The app cannot capture or store
+fingerprint/face templates or associate a device biometric with an individual
+student.
 
 On iPhone and iPad, Guided Access must be enabled and started by the device
 operator, or a school MDM must apply supervised Single App Mode. Pass Mode

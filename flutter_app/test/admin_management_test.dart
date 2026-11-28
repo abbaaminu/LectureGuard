@@ -26,16 +26,6 @@ void main() {
     );
     await database.database;
     requestPaths = [];
-    final student = {
-      'id': 'student-1',
-      'student_code': 'STU-1',
-      'first_name': 'Amina',
-      'last_name': 'Bello',
-      'grade_level': 10,
-      'homeroom': '10A',
-      'active': true,
-      'profile_id': null,
-    };
     client = SupabaseClient(
       'https://lectureguard.test',
       'test-key',
@@ -60,29 +50,22 @@ void main() {
           });
           return _json('profile-1', request);
         }
-        if (path.endsWith('/students') && request.method == 'POST') {
-          return _json(student, request);
-        }
-        if (path.endsWith('/students') && request.method == 'PATCH') {
+        if (path.endsWith('/functions/v1/admin-create-user')) {
           final values = jsonDecode(request.body) as Map<String, dynamic>;
-          return _json({...student, ...values}, request);
-        }
-        if (path.endsWith('/enrollments') && request.method == 'POST') {
+          expect(values, {
+            'email': 'new.teacher@example.test',
+            'password': 'LongPassphrase2026!',
+            'role': 'teacher',
+            'full_name': 'New Teacher',
+            'department': 'Science',
+          });
           return _json({
-            'lecture_id': 'lecture-1',
-            'student_id': 'student-1',
-            'active': true,
+            'id': 'profile-new',
+            'full_name': 'New Teacher',
+            'email': 'new.teacher@example.test',
+            'role': 'teacher',
+            'department': 'Science',
           }, request);
-        }
-        if (path.endsWith('/enrollments') && request.method == 'PATCH') {
-          return _json(
-            {
-              'lecture_id': 'lecture-1',
-              'student_id': 'student-1',
-              'active': false,
-            },
-            request,
-          );
         }
         return _json([], request);
       }),
@@ -124,112 +107,25 @@ void main() {
     );
   });
 
-  test('student create/update and enrollment changes persist to SQLite cache',
+  test('staff account creation calls the Edge Function and caches the profile',
       () async {
-    final student = await notifier.createAdminStudent(
-      studentCode: ' STU-1 ',
-      firstName: ' Amina ',
-      lastName: ' Bello ',
-      gradeLevel: 10,
-      homeroom: ' 10A ',
+    final profile = await notifier.createStaffLogin(
+      email: 'new.teacher@example.test',
+      password: 'LongPassphrase2026!',
+      role: UserRole.teacher,
+      fullName: 'New Teacher',
+      department: 'Science',
       client: client,
     );
-    expect(student['student_code'], 'STU-1');
-    expect((await database.getCachedAdminStudents()).single['active'], 1);
 
-    await notifier.setAdminEnrollment(
-      lectureId: 'lecture-1',
-      studentId: 'student-1',
-      active: true,
-      client: client,
-    );
+    expect(profile['id'], 'profile-new');
+    expect(profile['role'], 'teacher');
+    expect((await database.getCachedAdminProfiles()).single['email'],
+        'new.teacher@example.test');
     expect(
-      (await database.getCachedAdminEnrollments('lecture-1')).single['active'],
-      1,
-    );
-
-    await notifier.setAdminEnrollment(
-      lectureId: 'lecture-1',
-      studentId: 'student-1',
-      active: false,
-      client: client,
-    );
-    expect(
-      (await database.getCachedAdminEnrollments('lecture-1')).single['active'],
-      0,
-    );
-
-    await notifier.updateAdminStudent(
-      studentId: 'student-1',
-      studentCode: 'STU-1',
-      firstName: 'Amina',
-      lastName: 'Bello',
-      gradeLevel: 10,
-      homeroom: '10A',
-      active: false,
-      client: client,
-    );
-    expect((await database.getCachedAdminStudents()).single['active'], 0);
-    final enrollmentWrites =
-        requestPaths.where((path) => path.endsWith('/enrollments')).length;
-    await expectLater(
-      notifier.setAdminEnrollment(
-        lectureId: 'lecture-1',
-        studentId: 'student-1',
-        active: true,
-        client: client,
-      ),
-      throwsStateError,
-    );
-    expect(
-      requestPaths.where((path) => path.endsWith('/enrollments')).length,
-      enrollmentWrites,
-    );
-  });
-
-  test('student validation rejects a grade outside the school range', () async {
-    await expectLater(
-      notifier.createAdminStudent(
-        studentCode: 'STU-2',
-        firstName: 'Kofi',
-        lastName: 'Mensah',
-        gradeLevel: 13,
-        homeroom: '10A',
-        client: client,
-      ),
-      throwsArgumentError,
-    );
-  });
-
-  test('student login linking updates the cached profile id', () async {
-    await notifier.createAdminStudent(
-      studentCode: 'STU-1',
-      firstName: 'Amina',
-      lastName: 'Bello',
-      gradeLevel: 10,
-      homeroom: '10A',
-      client: client,
-    );
-
-    final linked = await notifier.setAdminStudentProfile(
-      studentId: 'student-1',
-      profileId: ' profile-student ',
-      client: client,
-    );
-    expect(linked['profile_id'], 'profile-student');
-    expect(
-      (await database.getCachedAdminStudents()).single['profile_id'],
-      'profile-student',
-    );
-
-    final unlinked = await notifier.setAdminStudentProfile(
-      studentId: 'student-1',
-      client: client,
-    );
-    expect(unlinked['profile_id'], isNull);
-    expect(
-      (await database.getCachedAdminStudents()).single['profile_id'],
-      isNull,
+      requestPaths
+          .any((path) => path.endsWith('/functions/v1/admin-create-user')),
+      isTrue,
     );
   });
 }

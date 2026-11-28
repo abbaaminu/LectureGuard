@@ -6,7 +6,7 @@ import 'session_ids.dart';
 
 class LocalDatabaseService {
   static const _dbName = 'lecture_guard_v1.db';
-  static const _dbVersion = 9;
+  static const _dbVersion = 10;
 
   final DatabaseFactory _databaseFactory;
   final String? _databasePath;
@@ -20,6 +20,162 @@ class LocalDatabaseService {
     if (_db != null) return _db!;
     _db = await _initDatabase();
     return _db!;
+  }
+
+  Future<void> savePendingTeacherEnrollment({
+    required String lectureId,
+    required String teacherId,
+    required Student student,
+  }) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.insert(
+        'students',
+        student.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.insert(
+        'enrollments',
+        {'lecture_id': lectureId, 'student_id': student.id},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.insert(
+        'pending_teacher_enrollments',
+        {
+          'lecture_id': lectureId,
+          'student_id': student.id,
+          'teacher_id': teacherId,
+          'last_error': null,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+  }
+
+  Future<List<Map<String, Object?>>> getPendingTeacherEnrollments(
+    String teacherId,
+  ) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT pending.lecture_id, pending.student_id, pending.teacher_id,
+             students.student_code, students.first_name, students.last_name,
+             students.grade_level, students.homeroom
+      FROM pending_teacher_enrollments AS pending
+      INNER JOIN students ON students.id = pending.student_id
+      WHERE pending.teacher_id = ?
+      ORDER BY students.last_name COLLATE NOCASE,
+               students.first_name COLLATE NOCASE
+    ''', [teacherId]);
+  }
+
+  Future<void> markTeacherEnrollmentSyncError({
+    required String lectureId,
+    required String studentId,
+    required String error,
+  }) async {
+    final db = await database;
+    await db.update(
+      'pending_teacher_enrollments',
+      {'last_error': error},
+      where: 'lecture_id = ? AND student_id = ?',
+      whereArgs: [lectureId, studentId],
+    );
+  }
+
+  Future<void> acknowledgeTeacherEnrollment({
+    required String lectureId,
+    required String pendingStudentId,
+    required Student canonicalStudent,
+  }) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'students',
+        where: 'id = ?',
+        whereArgs: [canonicalStudent.id],
+        limit: 1,
+      );
+      final pendingStudent = await txn.query(
+        'students',
+        columns: [
+          'biometric_enrollment_captured_at',
+          'biometric_enrollment_method',
+        ],
+        where: 'id = ?',
+        whereArgs: [pendingStudentId],
+        limit: 1,
+      );
+      final canonicalRow = canonicalStudent.toMap();
+      if (existing.isNotEmpty) {
+        canonicalRow['biometric_enrollment_captured_at'] ??=
+            existing.single['biometric_enrollment_captured_at'];
+        canonicalRow['biometric_enrollment_method'] ??=
+            existing.single['biometric_enrollment_method'];
+      }
+      if (pendingStudent.isNotEmpty) {
+        canonicalRow['biometric_enrollment_captured_at'] ??=
+            pendingStudent.single['biometric_enrollment_captured_at'];
+        canonicalRow['biometric_enrollment_method'] ??=
+            pendingStudent.single['biometric_enrollment_method'];
+      }
+      if (canonicalStudent.id == pendingStudentId || existing.isEmpty) {
+        await txn.update(
+          'students',
+          canonicalRow,
+          where: 'id = ?',
+          whereArgs: [pendingStudentId],
+        );
+      } else {
+        await txn.delete(
+          'students',
+          where: 'id = ?',
+          whereArgs: [pendingStudentId],
+        );
+        await txn.update(
+          'students',
+          canonicalRow,
+          where: 'id = ?',
+          whereArgs: [canonicalStudent.id],
+        );
+      }
+
+      final pendingEnrollments = await txn.query(
+        'enrollments',
+        where: 'student_id = ?',
+        whereArgs: [pendingStudentId],
+      );
+      for (final enrollment in pendingEnrollments) {
+        await txn.insert(
+          'enrollments',
+          {
+            'lecture_id': enrollment['lecture_id'],
+            'student_id': canonicalStudent.id,
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+      await txn.delete(
+        'enrollments',
+        where: 'student_id = ?',
+        whereArgs: [pendingStudentId],
+      );
+      await txn.update(
+        'attendance_records',
+        {'student_id': canonicalStudent.id},
+        where: 'student_id = ?',
+        whereArgs: [pendingStudentId],
+      );
+      await txn.insert(
+        'enrollments',
+        {'lecture_id': lectureId, 'student_id': canonicalStudent.id},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.delete(
+        'pending_teacher_enrollments',
+        where: 'lecture_id = ? AND student_id = ?',
+        whereArgs: [lectureId, pendingStudentId],
+      );
+    });
   }
 
   Future<Database> _initDatabase() async {
@@ -43,8 +199,10 @@ class LocalDatabaseService {
             student_code TEXT NOT NULL UNIQUE,
             first_name TEXT NOT NULL,
             last_name TEXT NOT NULL,
-            grade_level INTEGER NOT NULL,
-            homeroom TEXT NOT NULL
+            grade_level INTEGER,
+            homeroom TEXT,
+            biometric_enrollment_captured_at TEXT,
+            biometric_enrollment_method TEXT
           );
           ''');
 
@@ -77,6 +235,15 @@ class LocalDatabaseService {
           CREATE TABLE enrollments (
             lecture_id TEXT NOT NULL,
             student_id TEXT NOT NULL,
+            PRIMARY KEY (lecture_id, student_id)
+          );
+          ''');
+          await db.execute('''
+          CREATE TABLE pending_teacher_enrollments (
+            lecture_id TEXT NOT NULL,
+            student_id TEXT NOT NULL,
+            teacher_id TEXT NOT NULL,
+            last_error TEXT,
             PRIMARY KEY (lecture_id, student_id)
           );
           ''');
@@ -225,6 +392,63 @@ class LocalDatabaseService {
               );
             }
           }
+          if (oldVersion < 10) {
+            final studentColumns = await db.rawQuery(
+              'PRAGMA table_info(students);',
+            );
+            if (studentColumns.isEmpty) {
+              // Very old or partially provisioned databases may not have the
+              // roster table yet. Create it with the v10 nullable shape.
+              await db.execute('''
+                CREATE TABLE students (
+                  id TEXT PRIMARY KEY,
+                  student_code TEXT NOT NULL UNIQUE,
+                  first_name TEXT NOT NULL,
+                  last_name TEXT NOT NULL,
+                  grade_level INTEGER,
+                  homeroom TEXT,
+                  biometric_enrollment_captured_at TEXT,
+                  biometric_enrollment_method TEXT
+                );
+              ''');
+            } else {
+              // SQLite cannot drop the legacy NOT NULL constraints in place, so
+              // rebuild the table and add the biometric capture columns.
+              await db.execute('ALTER TABLE students RENAME TO students_v9;');
+              await db.execute('''
+                CREATE TABLE students (
+                  id TEXT PRIMARY KEY,
+                  student_code TEXT NOT NULL UNIQUE,
+                  first_name TEXT NOT NULL,
+                  last_name TEXT NOT NULL,
+                  grade_level INTEGER,
+                  homeroom TEXT,
+                  biometric_enrollment_captured_at TEXT,
+                  biometric_enrollment_method TEXT
+                );
+              ''');
+              await db.execute('''
+                INSERT INTO students (
+                  id, student_code, first_name, last_name, grade_level, homeroom
+                )
+                SELECT id, student_code, first_name, last_name, grade_level, homeroom
+                FROM students_v9;
+              ''');
+              await db.execute('DROP TABLE students_v9;');
+            }
+            await db.execute('''
+              CREATE TABLE IF NOT EXISTS pending_teacher_enrollments (
+                lecture_id TEXT NOT NULL,
+                student_id TEXT NOT NULL,
+                teacher_id TEXT NOT NULL,
+                last_error TEXT,
+                PRIMARY KEY (lecture_id, student_id)
+              );
+            ''');
+            await db.execute(
+              'CREATE INDEX IF NOT EXISTS idx_students_alpha ON students(last_name COLLATE NOCASE, first_name COLLATE NOCASE);',
+            );
+          }
           if (oldVersion < 6) {
             await db.execute('''
               CREATE TABLE pending_lecture_timetable_updates (
@@ -318,14 +542,37 @@ class LocalDatabaseService {
       );
       await txn.delete(
         'enrollments',
-        where: 'lecture_id = ?',
-        whereArgs: [lecture.id],
+        where: '''
+          lecture_id = ?
+          AND student_id NOT IN (
+            SELECT student_id FROM pending_teacher_enrollments
+            WHERE lecture_id = ?
+          )
+        ''',
+        whereArgs: [lecture.id, lecture.id],
       );
       final batch = txn.batch();
       for (final student in students) {
+        final cachedCapture = await txn.query(
+          'students',
+          columns: [
+            'biometric_enrollment_captured_at',
+            'biometric_enrollment_method',
+          ],
+          where: 'id = ?',
+          whereArgs: [student.id],
+          limit: 1,
+        );
+        final studentMap = student.toMap();
+        if (cachedCapture.isNotEmpty) {
+          studentMap['biometric_enrollment_captured_at'] ??=
+              cachedCapture.single['biometric_enrollment_captured_at'];
+          studentMap['biometric_enrollment_method'] ??=
+              cachedCapture.single['biometric_enrollment_method'];
+        }
         batch.insert(
           'students',
-          student.toMap(),
+          studentMap,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
         batch.insert(
@@ -463,6 +710,9 @@ class LocalDatabaseService {
         'last_name': student['last_name'],
         'grade_level': student['grade_level'],
         'homeroom': student['homeroom'],
+        'biometric_enrollment_captured_at':
+            student['biometric_enrollment_captured_at'],
+        'biometric_enrollment_method': student['biometric_enrollment_method'],
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
@@ -952,7 +1202,11 @@ class LocalDatabaseService {
   Future<int> getPendingSyncCount() async {
     final db = await database;
     final result = await db.rawQuery(
-      'SELECT COUNT(*) AS cnt FROM attendance_records WHERE sync_status != ?',
+      '''
+      SELECT
+        (SELECT COUNT(*) FROM attendance_records WHERE sync_status != ?) +
+        (SELECT COUNT(*) FROM pending_teacher_enrollments) AS cnt
+      ''',
       [SyncStatus.synced.name],
     );
     return Sqflite.firstIntValue(result) ?? 0;
@@ -981,7 +1235,8 @@ class LocalDatabaseService {
         (SELECT COUNT(*) FROM attendance_sessions WHERE sync_status != ?) +
         (SELECT COUNT(*) FROM attendance_sessions
           WHERE submitted_to_cloud_at IS NOT NULL
-            AND submitted_to_cloud_synced = 0) AS cnt
+            AND submitted_to_cloud_synced = 0) +
+        (SELECT COUNT(*) FROM pending_teacher_enrollments) AS cnt
     ''', [SyncStatus.synced.name, SyncStatus.synced.name]);
     return Sqflite.firstIntValue(rows) ?? 0;
   }

@@ -50,6 +50,7 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
 \ir ../migrations/005_school_settings_left_join.sql
 \ir ../migrations/006_grants_and_role_provisioning.sql
 \ir ../migrations/007_teacher_update_own_lecture_schedule.sql
+\ir ../migrations/008_teacher_enrollment_and_staff_scope.sql
 
 DO $$
 BEGIN
@@ -116,6 +117,13 @@ BEGIN
        'EXECUTE'
      ) THEN
     RAISE EXCEPTION 'authenticated is missing an EXECUTE grant from migration 006';
+  END IF;
+  IF NOT has_function_privilege(
+       'authenticated',
+       'public.teacher_enroll_student(uuid,uuid,text,text,text)',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION 'authenticated is missing the teacher enrollment RPC grant';
   END IF;
   IF has_function_privilege(
        'anon', 'public.admin_set_user_role(text,public.user_role)', 'EXECUTE'
@@ -423,6 +431,59 @@ BEGIN
       own_records,
       (SELECT count(*) FROM public.teacher_submission_logs(1000, 0));
   END IF;
+  IF public.teacher_enroll_student(
+       '20000000-0000-0000-0000-000000000001',
+       '10000000-0000-0000-0000-000000000007',
+       'STU-TEACHER-1',
+       'New',
+       'Student'
+     ) <> '10000000-0000-0000-0000-000000000007'::uuid THEN
+    RAISE EXCEPTION 'teacher enrollment RPC returned the wrong student id';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.enrollments
+    WHERE lecture_id = '20000000-0000-0000-0000-000000000001'
+      AND student_id = '10000000-0000-0000-0000-000000000007'
+      AND active
+  ) THEN
+    RAISE EXCEPTION 'teacher could not enroll a student in their lecture';
+  END IF;
+
+  BEGIN
+    PERFORM public.teacher_enroll_student(
+      '20000000-0000-0000-0000-000000000002',
+      '10000000-0000-0000-0000-000000000008',
+      'STU-OTHER-LECTURE',
+      'Unauthorized',
+      'Student'
+    );
+    RAISE EXCEPTION 'teacher enrolled a student in another teacher''s lecture';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.students (
+      id, student_code, first_name, last_name
+    )
+    VALUES (
+      '10000000-0000-0000-0000-000000000008',
+      'STU-DIRECT-INSERT',
+      'Direct',
+      'Insert'
+    );
+    RAISE EXCEPTION 'teacher directly inserted a student outside the enrollment RPC';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.enrollments (lecture_id, student_id)
+    VALUES (
+      '20000000-0000-0000-0000-000000000002',
+      '10000000-0000-0000-0000-000000000001'
+    );
+    RAISE EXCEPTION 'teacher directly enrolled a student in another teacher''s lecture';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
   -- The log function is scoped by session ownership, not by view policies.
   IF EXISTS (
     SELECT 1 FROM public.teacher_submission_logs(1000, 0)
@@ -559,6 +620,11 @@ END;
 $$;
 RESET ROLE;
 
+DELETE FROM public.enrollments
+WHERE student_id = '10000000-0000-0000-0000-000000000007';
+DELETE FROM public.students
+WHERE id = '10000000-0000-0000-0000-000000000007';
+
 -- Admin access remains school-wide and can insert/update profiles.
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000001', true);
 SET ROLE authenticated;
@@ -575,6 +641,25 @@ BEGIN
      OR (SELECT count(*) FROM public.teacher_submission_logs(1000, 0)) <> 6 THEN
     RAISE EXCEPTION 'admin cannot see school-wide data';
   END IF;
+
+  BEGIN
+    INSERT INTO public.students (
+      student_code, first_name, last_name
+    )
+    VALUES ('STU-ADMIN-DIRECT', 'Admin', 'Insert');
+    RAISE EXCEPTION 'admin directly created a student outside teacher enrollment';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.enrollments (lecture_id, student_id)
+    VALUES (
+      '20000000-0000-0000-0000-000000000002',
+      '10000000-0000-0000-0000-000000000001'
+    );
+    RAISE EXCEPTION 'admin directly changed lecture enrollment';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
 
   UPDATE public.lectures
   SET teacher_id = '00000000-0000-0000-0000-000000000003'

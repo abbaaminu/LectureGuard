@@ -12,18 +12,29 @@ class LecturePickerScreen extends ConsumerStatefulWidget {
 }
 
 class _LecturePickerScreenState extends ConsumerState<LecturePickerScreen> {
+  final _studentNameController = TextEditingController();
+  final _studentCodeController = TextEditingController();
   List<Lecture> _lectures = const [];
   Lecture? _selectedLecture;
   List<Student> _selectedRoster = const [];
   Object? _lectureLoadError;
   Object? _rosterError;
+  Object? _enrollmentError;
   bool _loadingLectures = true;
   bool _loadingRoster = false;
+  bool _enrollingStudent = false;
 
   @override
   void initState() {
     super.initState();
     _loadLectures();
+  }
+
+  @override
+  void dispose() {
+    _studentNameController.dispose();
+    _studentCodeController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadLectures() async {
@@ -59,6 +70,7 @@ class _LecturePickerScreenState extends ConsumerState<LecturePickerScreen> {
       _selectedRoster = const [];
       _loadingRoster = true;
       _rosterError = null;
+      _enrollmentError = null;
     });
     try {
       final notifier = ref.read(lectureSessionProvider.notifier);
@@ -92,6 +104,57 @@ class _LecturePickerScreenState extends ConsumerState<LecturePickerScreen> {
       if (mounted) {
         setState(() => _rosterError = error);
       }
+    }
+  }
+
+  Future<void> _enrollStudent() async {
+    final lecture = _selectedLecture;
+    if (lecture == null || _enrollingStudent) return;
+    final name = _studentNameController.text.trim();
+    final code = _studentCodeController.text.trim();
+    if (name.isEmpty || code.isEmpty) {
+      setState(() => _enrollmentError = StateError(
+            'Enter the student name and registration number.',
+          ));
+      return;
+    }
+
+    setState(() {
+      _enrollingStudent = true;
+      _enrollmentError = null;
+    });
+    try {
+      final result = await ref
+          .read(lectureSessionProvider.notifier)
+          .enrollStudentInLecture(
+            lecture: lecture,
+            studentName: name,
+            studentCode: code,
+          );
+      final roster = await ref
+          .read(localDatabaseProvider)
+          .getAlphabeticalRoster(lecture.id);
+      if (!mounted) return;
+      setState(() {
+        _selectedRoster = roster;
+        _enrollmentError = null;
+        _studentNameController.clear();
+        _studentCodeController.clear();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.syncedToCloud
+                ? 'Student enrolled. Device biometric verification saved; no biometric template is stored.'
+                : 'Student saved on this device; cloud sync is pending: ${result.syncError}',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _enrollmentError = error);
+    } finally {
+      if (mounted) setState(() => _enrollingStudent = false);
     }
   }
 
@@ -180,25 +243,82 @@ class _LecturePickerScreenState extends ConsumerState<LecturePickerScreen> {
                               top: false,
                               child: Padding(
                                 padding: const EdgeInsets.all(16),
-                                child: Row(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
                                   children: [
-                                    Expanded(
-                                      child: Text(
-                                        _loadingRoster
-                                            ? 'Loading roster…'
-                                            : _rosterError != null
-                                                ? 'Could not load roster: '
-                                                    '$_rosterError'
-                                                : '${_selectedRoster.length} students cached',
-                                        style: _rosterError == null
-                                            ? null
-                                            : TextStyle(
-                                                color: Theme.of(context)
-                                                    .colorScheme
-                                                    .error,
-                                              ),
+                                    Text(
+                                      _loadingRoster
+                                          ? 'Loading roster…'
+                                          : _rosterError != null
+                                              ? 'Could not load roster: '
+                                                  '$_rosterError'
+                                              : '${_selectedRoster.length} students cached',
+                                      style: _rosterError == null
+                                          ? null
+                                          : TextStyle(
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .error,
+                                            ),
+                                    ),
+                                    if (_enrollmentError != null)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 6),
+                                        child: Text(
+                                          'Could not enroll student: '
+                                          '$_enrollmentError',
+                                          style: TextStyle(
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .error,
+                                          ),
+                                        ),
+                                      ),
+                                    const SizedBox(height: 8),
+                                    TextField(
+                                      controller: _studentNameController,
+                                      textCapitalization:
+                                          TextCapitalization.words,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Student Name',
+                                        border: OutlineInputBorder(),
                                       ),
                                     ),
+                                    const SizedBox(height: 8),
+                                    TextField(
+                                      controller: _studentCodeController,
+                                      textCapitalization:
+                                          TextCapitalization.characters,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Registration Number',
+                                        border: OutlineInputBorder(),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    const Text(
+                                      'The device verifies an enrolled face or fingerprint. Only verification time and method are stored; biometric templates are not captured.',
+                                    ),
+                                    const SizedBox(height: 8),
+                                    OutlinedButton.icon(
+                                      onPressed: _enrollingStudent
+                                          ? null
+                                          : _enrollStudent,
+                                      icon: _enrollingStudent
+                                          ? const SizedBox(
+                                              width: 18,
+                                              height: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(Icons.fingerprint),
+                                      label: const Text(
+                                        'Verify & Enroll Student',
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
                                     FilledButton(
                                       onPressed:
                                           _loadingRoster || _rosterError != null

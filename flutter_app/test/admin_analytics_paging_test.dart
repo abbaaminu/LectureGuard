@@ -184,7 +184,7 @@ void main() {
     expect(find.text('No students match these filters.'), findsOneWidget);
   });
 
-  testWidgets('School Management keeps existing tabs and adds admin management',
+  testWidgets('Admin Management creates staff logins without student controls',
       (tester) async {
     await tester.pumpWidget(wrap(buildClient()));
     await tester.pump();
@@ -201,10 +201,25 @@ void main() {
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }
+    expect(find.text('Create Staff Login'), findsOneWidget);
+    expect(find.text('Add student'), findsNothing);
+    expect(find.text('Lecture enrollment'), findsNothing);
+
+    await tester.tap(find.text('Create Staff Login'));
+    await tester.pump();
+    // Explicit pumps: background loaders keep animating, so pumpAndSettle
+    // would never return.
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
-      find.textContaining('Create new accounts in Supabase Auth first.'),
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Create Staff Login'),
+      ),
       findsOneWidget,
     );
+    expect(find.text('Initial password'), findsOneWidget);
+    expect(find.text('Department (optional)'), findsOneWidget);
+    expect(find.text('Staff role'), findsOneWidget);
   });
 
   testWidgets('School Records loads attendance rows in pages', (tester) async {

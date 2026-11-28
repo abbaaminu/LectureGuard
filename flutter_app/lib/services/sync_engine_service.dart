@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../models/attendance_models.dart';
 import 'local_database_service.dart';
 
 enum NetworkTransport { offline, wifi, mobile, ethernet }
@@ -210,6 +211,11 @@ class SyncEngineService {
         );
       }
 
+      final teacherId = _currentUserId;
+      if (teacherId != null) {
+        errors.addAll(await syncPendingTeacherEnrollments(teacherId));
+      }
+
       final pendingSessions = await _localDb.getPendingSyncSessions();
       for (var i = 0; i < pendingSessions.length; i += batchChunkSize) {
         if (await currentTransport() == NetworkTransport.offline ||
@@ -322,7 +328,6 @@ class SyncEngineService {
         }
       }
 
-      final teacherId = _currentUserId;
       if (teacherId != null) {
         errors.addAll(
           await syncPendingLectureTimetableUpdates(teacherId),
@@ -440,6 +445,60 @@ class SyncEngineService {
         await _localDb.clearPendingLectureTimetableEdit(lecture.id);
       } catch (error) {
         errors.add('Lecture ${lecture.id} timetable update failed: $error');
+      }
+    }
+    await _refreshPendingTimer();
+    return errors;
+  }
+
+  Future<List<String>> syncPendingTeacherEnrollments(String teacherId) async {
+    final errors = <String>[];
+    final pending = await _localDb.getPendingTeacherEnrollments(teacherId);
+    for (final enrollment in pending) {
+      final lectureId = enrollment['lecture_id'] as String;
+      final studentId = enrollment['student_id'] as String;
+      if (await currentTransport() == NetworkTransport.offline ||
+          !await _hasReachability()) {
+        errors.add('Connection lost before teacher student enrollment sync.');
+        break;
+      }
+      try {
+        final result = await _supabase.rpc(
+          'teacher_enroll_student',
+          params: {
+            'p_lecture_id': lectureId,
+            'p_student_id': studentId,
+            'p_student_code': enrollment['student_code'],
+            'p_first_name': enrollment['first_name'],
+            'p_last_name': enrollment['last_name'],
+          },
+        ).timeout(const Duration(seconds: 15));
+        if (result == null || result.toString().isEmpty) {
+          throw StateError('The cloud did not confirm the student enrollment.');
+        }
+        final canonicalId = result.toString();
+        final row = await _supabase
+            .from('students')
+            .select(
+              'id, student_code, first_name, last_name, grade_level, homeroom',
+            )
+            .eq('id', canonicalId)
+            .single()
+            .timeout(const Duration(seconds: 15));
+        await _localDb.acknowledgeTeacherEnrollment(
+          lectureId: lectureId,
+          pendingStudentId: studentId,
+          canonicalStudent: Student.fromMap(row),
+        );
+      } catch (error) {
+        final message =
+            'Student ${enrollment['student_code']} enrollment failed: $error';
+        await _localDb.markTeacherEnrollmentSyncError(
+          lectureId: lectureId,
+          studentId: studentId,
+          error: message,
+        );
+        errors.add(message);
       }
     }
     await _refreshPendingTimer();
